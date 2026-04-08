@@ -79,7 +79,7 @@ Before using the environment, you need to build the Docker image:
 
 ```bash
 # From project root
-docker build -t firewatch-env:latest -f server/Dockerfile .
+docker build -t firewatch-env:latest .
 ```
 
 ---
@@ -335,7 +335,7 @@ curl http://localhost:8000/health
 
 ```bash
 # Build the image
-docker build -t firewatch-env:latest -f server/Dockerfile .
+docker build -t firewatch-env:latest .
 
 # Run the container
 docker run -p 8000:8000 firewatch-env:latest
@@ -374,9 +374,14 @@ python inference.py
 
 ## Project Structure
 
+## Project Structure
+
 ```text
 firewatch/
 |-- .dockerignore          # Docker build exclusions
+|-- .gitignore             # Git ignore rules
+|-- Dockerfile             # Container image definition (root)
+|-- LICENSE                # MIT License
 |-- README.md              # This file
 |-- openenv.yaml           # OpenEnv manifest
 |-- pyproject.toml         # Project metadata and dependencies
@@ -395,7 +400,7 @@ firewatch/
     |-- __init__.py
     |-- firewatch_environment.py  # OpenEnv environment class
     |-- app.py                    # FastAPI application
-    `-- Dockerfile                # Container image definition
+    `-- Dockerfile                # Container image (backup copy)
 ```
 
 ---
