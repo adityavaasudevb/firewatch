@@ -163,7 +163,10 @@ class FireWatchEnvironment(Environment):
                     steps_taken=self._step,
                     max_steps=self._step_budget,
                 )
-                self._final_score = grader_output["score"]
+                # Double clamp to ensure scores are strictly between 0 and 1
+                raw_score = grader_output["score"]
+                self._final_score = max(0.001, min(0.999, raw_score))
+                grader_output["score"] = self._final_score
                 extra_metadata["final_score"] = self._final_score
                 extra_metadata["grader_details"] = grader_output
 
