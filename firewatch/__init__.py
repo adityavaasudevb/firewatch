@@ -1,0 +1,1 @@
+"""FireWatch — SRE Incident Response simulation package."""
