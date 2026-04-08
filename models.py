@@ -1,13 +1,10 @@
 """
 Data models for the FireWatch SRE Incident Response Environment.
-
-FireWatch simulates a production distributed system where AI agents
-diagnose and remediate live failures under time pressure.
 """
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from openenv.core.env_server.types import Action, Observation
 
@@ -53,10 +50,10 @@ class FireWatchAction(Action):
 
 
 # =============================================================================
-# Sub-models used inside observations
+# Sub-models (plain BaseModel, NOT Action)
 # =============================================================================
 
-class AlertModel(Action):
+class AlertModel(BaseModel):
     """Represents a firing alert for a degraded or down service."""
 
     service: str
@@ -66,7 +63,7 @@ class AlertModel(Action):
     status: str
 
 
-class ServiceStatusModel(Action):
+class ServiceStatusModel(BaseModel):
     """Current status snapshot of a single service."""
 
     name: str
@@ -76,7 +73,7 @@ class ServiceStatusModel(Action):
     latency_ms: int
 
 
-class TopologyModel(Action):
+class TopologyModel(BaseModel):
     """Service dependency graph returned by get_topology."""
 
     services: List[str]

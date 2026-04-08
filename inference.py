@@ -5,14 +5,14 @@ MANDATORY COMPLIANCE:
   - Uses OpenAI API client for all LLM calls
   - Reads API_BASE_URL, MODEL_NAME, HF_TOKEN from env vars
   - Default values for API_BASE_URL and MODEL_NAME
-  - Emits [START] [STEP] [END] structured logs (lowercase booleans)
+  - HF_TOKEN is mandatory (raises if missing)
+  - Emits ONLY [START] [STEP] [END] structured logs to stdout
   - Runtime under 20 minutes on 2 vCPU / 8GB RAM
 """
 
 import json
 import os
 import re
-import sys
 import textwrap
 import time
 from typing import Dict, List, Optional
@@ -20,14 +20,14 @@ from typing import Dict, List, Optional
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
-# MANDATORY env vars (with defaults where required)
+# MANDATORY env vars
 # ---------------------------------------------------------------------------
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-HF_TOKEN = os.getenv("HF_TOKEN")
 MODEL_NAME = os.getenv("MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.2")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 if HF_TOKEN is None:
-    print("[WARN] HF_TOKEN not set — LLM calls will fail, using heuristic fallback.", flush=True)
+    raise ValueError("HF_TOKEN environment variable is required")
 
 # ---------------------------------------------------------------------------
 # Config
@@ -49,8 +49,7 @@ VALID_TARGETS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Structured logging — [START] [STEP] [END]
-# Uses lowercase true/false as required by spec
+# Structured logging — ONLY [START] [STEP] [END] to stdout
 # ---------------------------------------------------------------------------
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -68,12 +67,12 @@ def log_step(step: int, action: str, reward: float,
     )
 
 
-def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     success_str = "true" if success else "false"
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
         f"[END] success={success_str} steps={steps} "
-        f"rewards={rewards_str}",
+        f"score={score:.2f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -127,7 +126,6 @@ RESPONSE FORMAT — respond with ONLY valid JSON, no other text:
 # ---------------------------------------------------------------------------
 
 def observation_to_prompt(obs_dict: dict, step: int, action_history: list) -> str:
-    """Convert observation dict to a text prompt for the LLM."""
     alerts = obs_dict.get("active_alerts", [])
     services = obs_dict.get("services", {})
     last = obs_dict.get("last_action_result", "")
@@ -172,9 +170,9 @@ def observation_to_prompt(obs_dict: dict, step: int, action_history: list) -> st
 
     urgency = ""
     if budget is not None and budget <= 5:
-        urgency = f"\n⚠ URGENT: Only {budget} steps left. Apply fixes immediately or call mark_resolved."
+        urgency = f"\nURGENT: Only {budget} steps left. Apply fixes immediately or call mark_resolved."
     elif health >= 0.82:
-        urgency = "\n✓ System health is good. Consider calling mark_resolved."
+        urgency = "\nSystem health is good. Consider calling mark_resolved."
 
     return textwrap.dedent(f"""
 STEP {step} | System Health: {health:.3f} | Steps Remaining: {budget_str}
@@ -203,7 +201,6 @@ What is your next action? Respond with JSON only.
 # ---------------------------------------------------------------------------
 
 def parse_action(response_text: str) -> Optional[dict]:
-    """Parse LLM JSON response into tool/target dict."""
     if not response_text:
         return None
 
@@ -233,9 +230,6 @@ def parse_action(response_text: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def heuristic_fallback(obs: dict, history: list) -> dict:
-    """
-    Deterministic fallback when LLM is unavailable or gives bad output.
-    """
     done_actions = {(a["tool"], a["target"]) for a in history}
     services = obs.get("services", {})
     health = obs.get("system_health", 0.0)
@@ -291,36 +285,43 @@ def heuristic_fallback(obs: dict, history: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Clamp score to strict (0, 1) range
+# ---------------------------------------------------------------------------
+
+def clamp_score(score: float) -> float:
+    """Ensure score is strictly between 0 and 1."""
+    return max(0.01, min(0.99, score))
+
+
+# ---------------------------------------------------------------------------
 # Run one task episode
 # ---------------------------------------------------------------------------
 
 def run_task(env, llm_client: OpenAI, task_id: str, task_name: str) -> dict:
-    """Run a full episode and emit structured logs."""
     from models import FireWatchAction
 
     BENCHMARK = "firewatch"
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-    obs = env.reset(task_id=task_id)
-    obs_dict = obs.model_dump()
-
     rewards: List[float] = []
     action_history: List[dict] = []
     steps_taken: int = 0
-    final_score: float = 0.0
-    success: bool = False
+    final_score: float = 0.01  # Default to valid score, never 0.0
 
-    for step_num in range(1, MAX_STEPS_PER_TASK + 1):
-        if obs_dict.get("done", False):
-            break
+    try:
+        obs = env.reset(task_id=task_id)
+        obs_dict = obs.model_dump()
 
-        error_msg: Optional[str] = None
-        user_prompt = observation_to_prompt(obs_dict, step_num, action_history)
+        for step_num in range(1, MAX_STEPS_PER_TASK + 1):
+            if obs_dict.get("done", False):
+                break
 
-        # Call LLM
-        action = None
-        try:
-            if HF_TOKEN:
+            error_msg: Optional[str] = None
+            user_prompt = observation_to_prompt(obs_dict, step_num, action_history)
+
+            # Call LLM
+            action = None
+            try:
                 completion = llm_client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=[
@@ -332,68 +333,78 @@ def run_task(env, llm_client: OpenAI, task_id: str, task_name: str) -> dict:
                 )
                 response_text = completion.choices[0].message.content or ""
                 action = parse_action(response_text)
-            else:
+            except Exception as exc:
                 response_text = ""
-        except Exception as exc:
-            response_text = ""
-            error_msg = str(exc)
+                error_msg = str(exc)
 
-        # Prevent repetition
-        if action and len(action_history) >= 3:
-            last_3 = [(a["tool"], a["target"]) for a in action_history[-3:]]
-            if last_3.count((action["tool"], action["target"])) >= 2:
+            # Prevent repetition
+            if action and len(action_history) >= 3:
+                last_3 = [(a["tool"], a["target"]) for a in action_history[-3:]]
+                if last_3.count((action["tool"], action["target"])) >= 2:
+                    action = heuristic_fallback(obs_dict, action_history)
+
+            # Fallback to heuristic if LLM failed
+            if action is None:
                 action = heuristic_fallback(obs_dict, action_history)
 
-        # Fallback to heuristic if LLM failed
-        if action is None:
-            action = heuristic_fallback(obs_dict, action_history)
+            action_str = f"{action['tool']}({action['target']})"
 
-        action_str = f"{action['tool']}({action['target']})"
+            step_reward = 0.0
+            done = False
 
-        step_reward = 0.0
-        done = False
+            try:
+                fw_action = FireWatchAction(
+                    tool=action["tool"],
+                    target=action["target"],
+                    parameters={},
+                )
+                result = env.step(fw_action)
 
-        try:
-            fw_action = FireWatchAction(
-                tool=action["tool"],
-                target=action["target"],
-                parameters={},
+                obs_dict = result.model_dump()
+                step_reward = float(result.reward or 0.0)
+                done = result.done
+                steps_taken = step_num
+
+                if done and result.metadata:
+                    raw_score = float(result.metadata.get("final_score", 0.01))
+                    final_score = clamp_score(raw_score)
+
+            except Exception as exc:
+                error_msg = str(exc)
+                done = True
+
+            rewards.append(step_reward)
+            action_history.append({
+                "step": step_num,
+                "tool": action["tool"],
+                "target": action["target"],
+            })
+
+            log_step(
+                step=step_num,
+                action=action_str,
+                reward=step_reward,
+                done=done,
+                error=error_msg,
             )
-            result = env.step(fw_action)
 
-            # result is a FireWatchObservation (OpenEnv compliant)
-            obs_dict = result.model_dump()
-            step_reward = float(result.reward or 0.0)
-            done = result.done
-            steps_taken = step_num
+            if done:
+                break
 
-            if done and result.metadata:
-                final_score = float(result.metadata.get("final_score", 0.0))
+    except Exception as exc:
+        # If anything goes wrong, still emit valid score
+        final_score = clamp_score(0.01)
 
-        except Exception as exc:
-            error_msg = str(exc)
-            done = True
-
-        rewards.append(step_reward)
-        action_history.append({
-            "step": step_num,
-            "tool": action["tool"],
-            "target": action["target"],
-        })
-
-        log_step(
-            step=step_num,
-            action=action_str,
-            reward=step_reward,
-            done=done,
-            error=error_msg,
+    finally:
+        # ALWAYS emit [END] even on exception
+        final_score = clamp_score(final_score)
+        success = final_score >= SUCCESS_SCORE_THRESHOLD
+        log_end(
+            success=success,
+            steps=steps_taken,
+            score=final_score,
+            rewards=rewards,
         )
-
-        if done:
-            break
-
-    success = final_score >= SUCCESS_SCORE_THRESHOLD
-    log_end(success=success, steps=steps_taken, rewards=rewards)
 
     return {
         "task_id": task_id,
@@ -410,19 +421,11 @@ def run_task(env, llm_client: OpenAI, task_id: str, task_name: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def main() -> float:
-    print("=" * 60, flush=True)
-    print("  FireWatch — Baseline Inference Script", flush=True)
-    print("=" * 60, flush=True)
-    print(f"  Model:    {MODEL_NAME}", flush=True)
-    print(f"  Base URL: {API_BASE_URL}", flush=True)
-    print(f"  Max steps per task: {MAX_STEPS_PER_TASK}", flush=True)
-    print("=" * 60, flush=True)
-
     from server.firewatch_environment import FireWatchEnvironment
 
     llm_client = OpenAI(
         base_url=API_BASE_URL,
-        api_key=HF_TOKEN or "placeholder",
+        api_key=HF_TOKEN,
     )
     env = FireWatchEnvironment()
 
@@ -433,36 +436,13 @@ def main() -> float:
         ("task4", "Non-stationary Adaptive Incident"),
     ]
 
-    start_time = time.time()
     results = []
 
     for task_id, task_name in tasks:
-        print(f"\n  ── {task_name} ──", flush=True)
         result = run_task(env, llm_client, task_id, task_name)
         results.append(result)
 
-    elapsed = time.time() - start_time
     avg_score = sum(r["score"] for r in results) / len(results)
-
-    print("\n" + "=" * 60, flush=True)
-    print("  SCORE SUMMARY", flush=True)
-    print("=" * 60, flush=True)
-    for r in results:
-        bar = "█" * int(r["score"] * 20) + "░" * (20 - int(r["score"] * 20))
-        print(f"  {r['task_id']:<10} {r['score']:.4f}  [{bar}]", flush=True)
-    print(f"\n  Average: {avg_score:.4f} | Time: {elapsed:.1f}s", flush=True)
-    print("=" * 60, flush=True)
-
-    output = {
-        "model": MODEL_NAME,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "average_score": avg_score,
-        "results": results,
-    }
-    with open("baseline_scores.json", "w") as f:
-        json.dump(output, f, indent=2)
-
-    print("\n  Saved -> baseline_scores.json", flush=True)
     return avg_score
 
 
