@@ -75,7 +75,8 @@ def grade_task1(
     penalty = min(0.25, wrong_restarts * 0.10)
 
     raw = fix_score + efficiency_score + diagnosis_score + health_score + behavior_score - penalty
-    score = round(max(0.0, min(1.0, raw)), 4)
+    # Clamp to strictly between 0 and 1 (not 0.0 or 1.0)
+    score = round(max(0.001, min(0.999, raw)), 4)
 
     if not correct_fix:
         reason = "Agent failed to restart the database (OOM root cause)."
@@ -193,7 +194,7 @@ def grade_task2(
         + efficiency_score + health_score
         - symptom_penalty - behavior_penalty
     )
-    score = round(max(0.0, min(1.0, raw)), 4)
+    score = round(max(0.001, min(0.999, raw)), 4)
 
     return {
         "score": score,
@@ -290,7 +291,7 @@ def grade_task3(
     )
     if inv_score == 0:
         raw *= 0.75
-    score = round(max(0.0, min(1.0, raw)), 4)
+    score = round(max(0.001, min(0.999, raw)), 4)
 
     if not (fix1_idx or fix2_idx or fix3_idx):
         reason = "No meaningful fixes applied."
@@ -409,7 +410,7 @@ def grade_task4(
     if primary_fix and not investigated_db:
         raw_score *= 0.75
 
-    final_score = round(max(0.0, min(1.0, raw_score)), 4)
+    final_score = round(max(0.001, min(0.999, raw_score)), 4)
 
     parts = []
     if primary_fix:
