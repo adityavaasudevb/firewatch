@@ -33,8 +33,11 @@ VALID_TARGETS = [
 ]
 
 
-def clamp_strict(raw: float) -> float:
-    """Clamp to strictly within (0, 1) — never exactly 0.0 or 1.0."""
+def clamp_score(raw: float) -> float:
+    """
+    Clamp ONLY the final task score to strictly within (0, 1).
+    Per-step rewards are NOT clamped — negatives are valid and meaningful.
+    """
     return round(max(0.01, min(0.99, raw)), 2)
 
 
@@ -45,18 +48,18 @@ def log_start(task, env, model):
 def log_step(step, action, reward, done, error):
     done_str = "true" if done else "false"
     error_str = error if error is not None else "null"
-    safe_reward = clamp_strict(reward)
+    # Raw reward printed as-is — negatives are fine here
     print(
-        f"[STEP] step={step} action={action} reward={safe_reward:.2f} done={done_str} error={error_str}",
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_str} error={error_str}",
         flush=True,
     )
 
 
 def log_end(success, steps, score, rewards):
     success_str = "true" if success else "false"
-    safe_score = clamp_strict(score)
-    safe_rewards = [clamp_strict(r) for r in rewards]
-    rewards_str = ",".join(f"{r:.2f}" for r in safe_rewards)
+    # score= must be in (0,1) — this is what the validator checks
+    safe_score = clamp_score(score)
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
         f"[END] success={success_str} steps={steps} score={safe_score:.2f} rewards={rewards_str}",
         flush=True,
@@ -287,7 +290,7 @@ def run_task(env, llm_client, task_id):
                 action = heuristic_fallback(obs_dict, action_history)
 
             action_str = f"{action['tool']}({action['target']})"
-            step_reward = 0.01
+            step_reward = -0.02  # default: step cost
             done = False
             last_action_error = None
 
@@ -299,16 +302,16 @@ def run_task(env, llm_client, task_id):
                 )
                 result = env.step(fw_action)
                 obs_dict = result.model_dump()
-                step_reward = clamp_strict(float(result.reward or 0.01))
+                step_reward = float(result.reward or -0.02)
                 done = result.done
                 steps_taken = step_num
                 last_action_error = obs_dict.get("last_action_error", None)
 
                 if done and result.metadata:
                     raw_score = float(result.metadata.get("final_score", 0.05))
-                    final_score = clamp_strict(raw_score)
+                    final_score = clamp_score(raw_score)
             except Exception:
-                step_reward = 0.01
+                step_reward = -0.02
                 done = True
 
             rewards.append(step_reward)
@@ -331,7 +334,7 @@ def run_task(env, llm_client, task_id):
     except Exception:
         final_score = 0.05
 
-    final_score = clamp_strict(final_score)
+    final_score = clamp_score(final_score)
     success = final_score >= SUCCESS_SCORE_THRESHOLD
 
     return {
@@ -361,12 +364,12 @@ def main():
                     "score": 0.05,
                     "success": False,
                     "steps_taken": 0,
-                    "rewards": [0.01],
+                    "rewards": [-0.02],
                 }
             log_end(
                 success=result["success"],
                 steps=result["steps_taken"],
-                score=result["score"],        # ← THIS WAS MISSING
+                score=result["score"],
                 rewards=result["rewards"],
             )
 

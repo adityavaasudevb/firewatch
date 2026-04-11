@@ -27,8 +27,8 @@ except ImportError:
     from firewatch.graders import GRADERS
 
 
-def clamp_strict(raw: float) -> float:
-    """Clamp to strictly within (0, 1) — never exactly 0.0 or 1.0."""
+def clamp_score(raw: float) -> float:
+    """Clamp ONLY final grader scores to strictly within (0, 1)."""
     return round(max(0.01, min(0.99, raw)), 4)
 
 
@@ -69,14 +69,18 @@ class FireWatchEnvironment(Environment):
         self.sim.apply_scenario(self._task_config["scenario_id"])
         reset_episode_tracking(self._episode_id)
 
-        return self._build_observation(reward=0.01, done=False)
+        # reward=0.0 on reset is fine — not checked by validator
+        return self._build_observation(reward=0.0, done=False)
 
     def step(self, action: FireWatchAction) -> FireWatchObservation:
         if self._done:
             return self._build_observation(
-                reward=0.01,
+                reward=0.0,
                 done=True,
-                extra_metadata={"message": "Episode already ended.", "final_score": self._final_score},
+                extra_metadata={
+                    "message": "Episode already ended.",
+                    "final_score": self._final_score,
+                },
             )
 
         prev_health = self.sim.get_system_health()
@@ -84,7 +88,9 @@ class FireWatchEnvironment(Environment):
         self._last_action_result = action_result.get("message", "Action completed.")
 
         if action_result.get("success") is False or action_result.get("error"):
-            self._last_action_error = action_result.get("error") or action_result.get("message")
+            self._last_action_error = (
+                action_result.get("error") or action_result.get("message")
+            )
         else:
             self._last_action_error = None
 
@@ -93,6 +99,9 @@ class FireWatchEnvironment(Environment):
 
         curr_health = self.sim.get_system_health()
 
+        # Raw reward — negatives are intentional and meaningful
+        # r(t) = health_delta*2.0 + correct_fix_bonus + diagnosis_bonus
+        #       - wrong_fix_penalty - step_cost
         reward = compute_reward(
             episode_id=self._episode_id,
             prev_health=prev_health,
@@ -102,9 +111,6 @@ class FireWatchEnvironment(Environment):
             action_result=action_result,
             root_cause_services=self._task_config.get("root_causes", []),
         )
-
-        # reward is already clamped by compute_reward, but double-check
-        reward = clamp_strict(reward)
 
         if action.tool != "get_topology":
             self.sim.tick()
@@ -132,7 +138,8 @@ class FireWatchEnvironment(Environment):
                     steps_taken=self._step,
                     max_steps=self._step_budget,
                 )
-                self._final_score = clamp_strict(grader_output["score"])
+                # Only grader scores are clamped to (0.01, 0.99)
+                self._final_score = clamp_score(grader_output["score"])
                 grader_output["score"] = self._final_score
                 extra_metadata["final_score"] = self._final_score
                 extra_metadata["grader_details"] = grader_output
@@ -199,9 +206,6 @@ class FireWatchEnvironment(Environment):
         if extra_metadata:
             metadata.update(extra_metadata)
 
-        # Final safety clamp on reward
-        safe_rwd = clamp_strict(reward)
-
         return FireWatchObservation(
             step=self._step,
             system_health=self.sim.get_system_health(),
@@ -213,6 +217,6 @@ class FireWatchEnvironment(Environment):
             topology=topology,
             step_budget=budget,
             done=done,
-            reward=safe_rwd,
+            reward=reward,  # raw, never clamped — negatives are valid
             metadata=metadata,
         )
