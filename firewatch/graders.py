@@ -9,8 +9,8 @@ from typing import Dict, List
 
 
 def strict_score(raw: float) -> float:
-    """Clamp any score into the strict open interval (0, 1)."""
-    return round(max(0.001, min(0.999, float(raw))), 4)
+    """Clamp score to strictly within (0, 1) — never 0.0 or 1.0."""
+    return round(max(0.05, min(0.95, raw)), 4)
 
 
 # =============================================================================
@@ -80,7 +80,6 @@ def grade_task1(
     penalty = min(0.25, wrong_restarts * 0.10)
 
     raw = fix_score + efficiency_score + diagnosis_score + health_score + behavior_score - penalty
-    # Clamp to strictly between 0 and 1 (not 0.0 or 1.0)
     score = strict_score(raw)
 
     if not correct_fix:

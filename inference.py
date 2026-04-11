@@ -11,7 +11,7 @@ from typing import List, Optional
 from openai import OpenAI
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct-1M")
+MODEL_NAME = os.getenv("MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.2")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 if HF_TOKEN is None:
@@ -203,7 +203,7 @@ def heuristic_fallback(obs, history):
 
 
 def clamp_score(score):
-    return max(0.01, min(0.99, score))
+    return max(0.05, min(0.95, score))
 
 
 TASK_NAMES = {
@@ -224,7 +224,7 @@ def run_task(env, llm_client, task_id):
     rewards = []
     action_history = []
     steps_taken = 0
-    final_score = 0.01
+    final_score = 0.05
 
     try:
         obs = env.reset(task_id=task_id)
@@ -273,11 +273,10 @@ def run_task(env, llm_client, task_id):
                 done = result.done
                 steps_taken = step_num
 
-                # Read last_action_error directly from observation
                 last_action_error = obs_dict.get("last_action_error", None)
 
                 if done and result.metadata:
-                    raw_score = float(result.metadata.get("final_score", 0.01))
+                    raw_score = float(result.metadata.get("final_score", 0.05))
                     final_score = clamp_score(raw_score)
             except Exception:
                 done = True
@@ -290,7 +289,7 @@ def run_task(env, llm_client, task_id):
                 break
 
     except Exception:
-        final_score = clamp_score(0.01)
+        final_score = clamp_score(0.05)
 
     final_score = clamp_score(final_score)
     success = final_score >= SUCCESS_SCORE_THRESHOLD
