@@ -2,11 +2,6 @@
 server/firewatch_environment.py
 ===============================
 FireWatch SRE Incident Response Environment.
-
-Implements the OpenEnv Environment interface:
-  - reset() -> Observation
-  - step(action) -> Observation
-  - state -> State property
 """
 
 from typing import Optional
@@ -33,15 +28,19 @@ except ImportError:
 
 
 def clamp_env_score(raw: float) -> float:
-    """Ensure score is strictly between 0 and 1."""
     return max(0.05, min(0.95, raw))
 
 
-class FireWatchEnvironment(Environment):
-    """
-    FireWatch SRE Incident Response RL Environment.
-    """
+def safe_reward(raw: float) -> float:
+    """Ensure reward is never exactly 0.0 or 1.0."""
+    if raw == 0.0:
+        return 0.001
+    if raw == 1.0:
+        return 0.999
+    return raw
 
+
+class FireWatchEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     def __init__(self):
@@ -78,12 +77,12 @@ class FireWatchEnvironment(Environment):
         self.sim.apply_scenario(self._task_config["scenario_id"])
         reset_episode_tracking(self._episode_id)
 
-        return self._build_observation(reward=0.0, done=False)
+        return self._build_observation(reward=0.001, done=False)
 
     def step(self, action: FireWatchAction) -> FireWatchObservation:
         if self._done:
             return self._build_observation(
-                reward=0.0,
+                reward=0.001,
                 done=True,
                 extra_metadata={"message": "Episode already ended.", "final_score": self._final_score},
             )
@@ -92,7 +91,6 @@ class FireWatchEnvironment(Environment):
         action_result = self._execute_action(action)
         self._last_action_result = action_result.get("message", "Action completed.")
 
-        # Track errors
         if action_result.get("success") is False or action_result.get("error"):
             self._last_action_error = action_result.get("error") or action_result.get("message")
         else:
@@ -112,6 +110,9 @@ class FireWatchEnvironment(Environment):
             action_result=action_result,
             root_cause_services=self._task_config.get("root_causes", []),
         )
+
+        # Make reward safe
+        reward = safe_reward(reward)
 
         if action.tool != "get_topology":
             self.sim.tick()
@@ -158,7 +159,6 @@ class FireWatchEnvironment(Environment):
         return self._state
 
     def close(self):
-        """Clean up environment resources."""
         self._done = True
 
     def _execute_action(self, action: FireWatchAction) -> dict:
@@ -208,6 +208,9 @@ class FireWatchEnvironment(Environment):
         if extra_metadata:
             metadata.update(extra_metadata)
 
+        # Ensure reward is never exactly 0.0
+        safe_rwd = safe_reward(reward)
+
         return FireWatchObservation(
             step=self._step,
             system_health=self.sim.get_system_health(),
@@ -219,6 +222,6 @@ class FireWatchEnvironment(Environment):
             topology=topology,
             step_budget=budget,
             done=done,
-            reward=reward,
+            reward=safe_rwd,
             metadata=metadata,
         )

@@ -2,20 +2,16 @@
 firewatch/reward.py
 ===================
 Dense per-step reward computation.
-
-No sys.path hacks — clean imports only.
 """
 
 from typing import List
 
 
-# Per-episode tracking to prevent duplicate bonuses
 _diagnosis_given: set = set()
 _fix_given: set = set()
 
 
 def reset_episode_tracking(episode_id: str) -> None:
-    """Reset per-episode bonus tracking."""
     _diagnosis_given.discard(episode_id)
     _fix_given.discard(episode_id)
 
@@ -29,18 +25,6 @@ def compute_reward(
     action_result: dict,
     root_cause_services: List[str],
 ) -> float:
-    """
-    Compute per-step reward value.
-
-    r(t) = health_delta × 2.0
-         + correct_fix_bonus (1.0 one-time)
-         + diagnosis_bonus (0.3 one-time)
-         - wrong_fix_penalty (-0.3)
-         - step_cost (-0.02, except get_topology)
-
-    Returns:
-        float reward value
-    """
     health_delta = round(curr_health - prev_health, 4)
     health_reward = round(health_delta * 2.0, 4)
 
@@ -66,5 +50,9 @@ def compute_reward(
         + wrong_fix_penalty + step_cost,
         4,
     )
+
+    # Never return exactly 0.0 - use tiny positive value
+    if reward_value == 0.0:
+        reward_value = 0.001
 
     return reward_value
