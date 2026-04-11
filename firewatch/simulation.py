@@ -384,7 +384,11 @@ class SystemSimulator:
                 self._scenario_config["fix_order"].append(f"rollback_config:{service}")
             return {
                 "success": True,
-                "message": f"{service} config rolled back — memory leak stopped",
+                "message": (
+                    f"{service} config rolled back — memory leak stopped. "
+                    f"WARNING: service still degraded (health={svc['health']:.2f}). "
+                    f"Additional issues may remain — check logs."
+                ),
                 "correct_fix": True,
             }
         else:
