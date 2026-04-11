@@ -27,7 +27,7 @@ FireWatch simulates a production distributed system of 6 interconnected services
 
 ## Quick Start
 
-The simplest way to use the FireWatch environment is through the `FireWatchClient` class:
+The simplest way to use the FireWatch environment from this repository is through the `FireWatchClient` class:
 
 ```python
 from client import FireWatchClient
@@ -71,6 +71,8 @@ That's it! The `FireWatchClient.from_docker_image()` method handles:
 - Connecting to the environment
 - Container cleanup when you call `close()`
 
+The examples in this README assume you are working from the repository root, where [client.py](/c:/Users/adiva/Desktop/firewatch/client.py) and [models.py](/c:/Users/adiva/Desktop/firewatch/models.py) are directly importable.
+
 ---
 
 ## Building the Docker Image
@@ -101,6 +103,32 @@ The `openenv push` command will:
 1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
 2. Prepare a custom build for Hugging Face Docker space (enables web interface)
 3. Upload to Hugging Face (ensuring you're logged in)
+
+### Prerequisites
+
+- Authenticate with Hugging Face before pushing
+- Verify that `openenv validate` passes locally
+- Verify that the Docker image builds and runs locally
+
+### Options
+
+- `--directory`, `-d`: Directory containing the OpenEnv environment
+- `--repo-id`, `-r`: Repository ID in format `username/repo-name`
+- `--base-image`, `-b`: Override the Docker base image
+- `--private`: Deploy the Space as private
+
+### Examples
+
+```bash
+# Push to your default personal namespace
+openenv push
+
+# Push to a specific repository
+openenv push --repo-id pepparrr/firewatch
+
+# Push as a private Space
+openenv push --private
+```
 
 After deployment, your space will be available at:
 
@@ -162,6 +190,7 @@ Each service has: `health (0.0-1.0)`, `status (healthy/degraded/down)`, `error_r
 | `active_alerts` | `List[AlertModel]` | Firing alerts sorted by severity |
 | `services` | `Dict[str, ServiceStatusModel]` | Full status of all 6 services |
 | `last_action_result` | `str` | Plain English result of the last action |
+| `last_action_error` | `Optional[str]` | Raw error string from the last action, or `None` |
 | `incident_summary` | `str` | Natural language description of the incident |
 | `topology` | `Optional[TopologyModel]` | Dependency graph (None until `get_topology` is called) |
 | `step_budget` | `Optional[int]` | Steps remaining (hidden in Task 4) |
@@ -183,9 +212,20 @@ r(t) = health_delta * 2.0          # Health improvement/degradation
 
 `get_topology` has zero step cost - agents that plan before acting are rewarded by not wasting their budget.
 
+Step rewards shape the trajectory, but the final benchmark score comes from a deterministic task grader. The final score is **not** the sum of the per-step rewards printed during inference.
+
 ---
 
 ## Tasks
+
+FireWatch provides four tasks spanning increasing operational difficulty:
+
+| Task | Difficulty | Primary Challenge |
+|------|------------|-------------------|
+| `task1` | Easy | Single root-cause service failure |
+| `task2` | Medium | Cascading failure with a red herring |
+| `task3` | Hard | Ordered multi-fix remediation |
+| `task4` | Expert | Non-stationary incident with hidden step budget |
 
 ### Task 1 - Single Service Failure (Easy)
 
@@ -248,12 +288,16 @@ Scores produced by a hybrid LLM + heuristic baseline:
 | task4 | Non-stationary Adaptive Incident | Expert | 0.95 |
 | **Average** | | | **0.83** |
 
+These scores were produced with the verified submission-time setup using the Hugging Face router and `Qwen/Qwen2.5-7B-Instruct-1M`.
+
+Measured full-run inference time with this verified setup is approximately **28 seconds** on the tested machine.
+
 To reproduce baseline scores, run:
 
 ```bash
 export HF_TOKEN="your_token"
-export MODEL_NAME="mistralai/Mistral-7B-Instruct-v0.2"
-export API_BASE_URL="https://api-inference.huggingface.co/v1"
+export MODEL_NAME="Qwen/Qwen2.5-7B-Instruct-1M"
+export API_BASE_URL="https://router.huggingface.co/v1"
 python inference.py
 ```
 
@@ -337,7 +381,7 @@ curl http://localhost:8000/health
 # Build the image
 docker build -t firewatch-env:latest .
 
-# Run the container
+# Run the container (web UI enabled by default)
 docker run -p 8000:8000 firewatch-env:latest
 
 # Verify
@@ -349,8 +393,8 @@ curl http://localhost:8000/health
 ```bash
 # Set environment variables
 export HF_TOKEN="your_huggingface_token"
-export MODEL_NAME="mistralai/Mistral-7B-Instruct-v0.2"
-export API_BASE_URL="https://api-inference.huggingface.co/v1"
+export MODEL_NAME="Qwen/Qwen2.5-7B-Instruct-1M"
+export API_BASE_URL="https://router.huggingface.co/v1"
 
 # Run inference
 python inference.py
@@ -362,7 +406,7 @@ python inference.py
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Health check - returns `{"status": "ok"}` |
+| `/health` | GET | Health check - returns `{"status":"healthy"}` |
 | `/reset` | POST | Reset environment, returns initial observation |
 | `/step` | POST | Execute action, returns observation + reward |
 | `/state` | GET | Internal state snapshot |
@@ -371,8 +415,6 @@ python inference.py
 | `/ws` | WS | WebSocket endpoint for persistent sessions |
 
 ---
-
-## Project Structure
 
 ## Project Structure
 
@@ -409,11 +451,26 @@ firewatch/
 
 **Non-stationary world:** Every existing OpenEnv environment waits patiently for the agent. FireWatch degrades autonomously every step via `tick()`. Passivity is penalized by the environment itself, not by a sparse end-reward. This makes FireWatch a genuine non-stationary MDP - the property the RL research community has identified as most missing from current benchmarks.
 
+Unlike static or single-step benchmarks, delayed action in FireWatch changes the environment itself, so the agent is evaluated on triage under evolving system state rather than on isolated decisions.
+
 **Structured traps for LLMs:** Task 2's red herring exploits the LLM tendency to fix the most visible alert rather than trace root causation. Task 3's order dependency breaks models that jump to action without planning. Task 4's partial observability (hidden step budget + changing topology) collapses static reasoners. These are documented, research-validated failure modes of frontier models - not arbitrary difficulty.
 
 **Honest partial credit:** Every grader provides partial credit at multiple granularities. An agent that investigates correctly but applies the wrong fix still scores 0.20-0.35. No grader produces binary 0/1 outcomes.
 
 FireWatch evaluates not just correctness, but sequencing, causality reasoning, and adaptation under changing system dynamics.
+
+---
+
+## Verified Deployment
+
+FireWatch has been verified in the following ways:
+
+- `openenv validate` passes
+- `python inference.py` produces compliant structured logs
+- `docker build` succeeds
+- `docker run` succeeds
+- `/health`, `/docs`, and `/web` respond successfully
+- the Hugging Face Space deploys and runs successfully at `pepparrr/firewatch`
 
 ---
 
