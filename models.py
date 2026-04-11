@@ -120,3 +120,7 @@ class FireWatchObservation(Observation):
         default=None,
         description="Steps remaining (hidden in some tasks)",
     )
+    last_action_error: Optional[str] = Field(
+        default=None,
+        description="Raw error string from last action, or None if no error",
+    )

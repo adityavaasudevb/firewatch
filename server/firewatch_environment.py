@@ -11,7 +11,7 @@ Implements the OpenEnv Environment interface:
 Observation.done, Observation.reward, and Observation.metadata are
 inherited from the OpenEnv base Observation class.
 """
-
+from typing import Optional
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -62,7 +62,8 @@ class FireWatchEnvironment(Environment):
         self._step_budget: int = 10
         self._done: bool = False
         self._final_score: float = 0.0
-        self._last_action_result: str = "Episode not started. Call reset() first."
+        self._last_action_result: Optional[str] = None
+        self._last_action_error: Optional[str] = None
         self._topology_snapshot: dict = {}
         self._state = State(episode_id=self._episode_id, step_count=0)
 
@@ -89,6 +90,7 @@ class FireWatchEnvironment(Environment):
         self._done = False
         self._final_score = 0.0
         self._last_action_result = "Incident detected. Begin investigation."
+        self._last_action_error = None
         self._topology_snapshot = {}
         self._state = State(episode_id=self._episode_id, step_count=0)
 
@@ -118,6 +120,12 @@ class FireWatchEnvironment(Environment):
         prev_health = self.sim.get_system_health()
         action_result = self._execute_action(action)
         self._last_action_result = action_result.get("message", "Action completed.")
+        # Track errors
+        if action_result.get("success") is False or action_result.get("error"):
+            self._last_action_error = action_result.get("error") or action_result.get("message")
+        else:
+            self._last_action_error = None
+        
 
         # Cache topology when requested
         if action.tool == "get_topology":
@@ -180,6 +188,10 @@ class FireWatchEnvironment(Environment):
     def state(self) -> State:
         """Get the current environment state."""
         return self._state
+
+    def close(self):
+        """Clean up environment resources."""
+        self._done = True
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -245,6 +257,7 @@ class FireWatchEnvironment(Environment):
             active_alerts=alerts,
             services=services,
             last_action_result=self._last_action_result,
+            last_action_error=self._last_action_error,
             incident_summary=self._task_config.get("description", ""),
             topology=topology,
             step_budget=budget,
