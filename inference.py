@@ -6,7 +6,6 @@ import json
 import os
 import re
 import textwrap
-from typing import List, Optional
 
 from openai import OpenAI
 
@@ -34,13 +33,8 @@ VALID_TARGETS = [
 ]
 
 
-def clamp_reward_strict(raw: float) -> float:
-    """Clamp to strictly within (0, 1) — never 0.0 or 1.0."""
-    return round(max(0.01, min(0.99, raw)), 2)
-
-
-def clamp_score_strict(raw: float) -> float:
-    """Clamp score to strictly within (0, 1)."""
+def clamp_strict(raw: float) -> float:
+    """Clamp to strictly within (0, 1) — never exactly 0.0 or 1.0."""
     return round(max(0.01, min(0.99, raw)), 2)
 
 
@@ -51,15 +45,22 @@ def log_start(task, env, model):
 def log_step(step, action, reward, done, error):
     done_str = "true" if done else "false"
     error_str = error if error is not None else "null"
-    safe_reward = clamp_reward_strict(reward)
-    print(f"[STEP] step={step} action={action} reward={safe_reward:.2f} done={done_str} error={error_str}", flush=True)
+    safe_reward = clamp_strict(reward)
+    print(
+        f"[STEP] step={step} action={action} reward={safe_reward:.2f} done={done_str} error={error_str}",
+        flush=True,
+    )
 
 
-def log_end(success, steps, rewards):
+def log_end(success, steps, score, rewards):
     success_str = "true" if success else "false"
-    safe_rewards = [clamp_reward_strict(r) for r in rewards]
+    safe_score = clamp_strict(score)
+    safe_rewards = [clamp_strict(r) for r in rewards]
     rewards_str = ",".join(f"{r:.2f}" for r in safe_rewards)
-    print(f"[END] success={success_str} steps={steps} rewards={rewards_str}", flush=True)
+    print(
+        f"[END] success={success_str} steps={steps} score={safe_score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
 SYSTEM_PROMPT = textwrap.dedent("""
@@ -109,14 +110,21 @@ def observation_to_prompt(obs_dict, step, action_history):
     ) or "  None"
 
     svc_lines = "\n".join(
-        f"  {name}: health={s['health']:.2f}, status={s['status']}, error_rate={s['error_rate']:.2f}, latency={s['latency_ms']}ms"
+        f"  {name}: health={s['health']:.2f}, status={s['status']}, "
+        f"error_rate={s['error_rate']:.2f}, latency={s['latency_ms']}ms"
         for name, s in services.items()
     )
 
     topo_section = ""
     if topology:
-        deps = topology.get("dependencies", {}) if isinstance(topology, dict) else getattr(topology, "dependencies", {})
-        topo_lines = "\n".join(f"  {svc} -> {d or '(no deps)'}" for svc, d in deps.items())
+        deps = (
+            topology.get("dependencies", {})
+            if isinstance(topology, dict)
+            else getattr(topology, "dependencies", {})
+        )
+        topo_lines = "\n".join(
+            f"  {svc} -> {d or '(no deps)'}" for svc, d in deps.items()
+        )
         topo_section = f"\nDEPENDENCY GRAPH:\n{topo_lines}"
 
     history_lines = ""
@@ -175,9 +183,16 @@ def heuristic_fallback(obs, history):
     if ("get_topology", "system") not in done_actions:
         return {"tool": "get_topology", "target": "system"}
 
-    for svc in ["database", "api-gateway", "payment-service", "cache", "auth-service", "notification-service"]:
+    for svc in [
+        "database", "api-gateway", "payment-service",
+        "cache", "auth-service", "notification-service",
+    ]:
         svc_data = services.get(svc, {})
-        status = svc_data.get("status", "healthy") if isinstance(svc_data, dict) else "healthy"
+        status = (
+            svc_data.get("status", "healthy")
+            if isinstance(svc_data, dict)
+            else "healthy"
+        )
         if status != "healthy" and ("get_logs", svc) not in done_actions:
             return {"tool": "get_logs", "target": svc}
 
@@ -203,7 +218,10 @@ def heuristic_fallback(obs, history):
         if ("scale_service", "notification-service") not in done_actions:
             return {"tool": "scale_service", "target": "notification-service"}
 
-    degraded = [s for s, v in services.items() if isinstance(v, dict) and v.get("status") != "healthy"]
+    degraded = [
+        s for s, v in services.items()
+        if isinstance(v, dict) and v.get("status") != "healthy"
+    ]
     if health > 0.82 or not degraded:
         return {"tool": "mark_resolved", "target": "system"}
 
@@ -274,25 +292,38 @@ def run_task(env, llm_client, task_id):
             last_action_error = None
 
             try:
-                fw_action = FireWatchAction(tool=action["tool"], target=action["target"], parameters={})
+                fw_action = FireWatchAction(
+                    tool=action["tool"],
+                    target=action["target"],
+                    parameters={},
+                )
                 result = env.step(fw_action)
                 obs_dict = result.model_dump()
-                step_reward = clamp_reward_strict(float(result.reward or 0.01))
+                step_reward = clamp_strict(float(result.reward or 0.01))
                 done = result.done
                 steps_taken = step_num
-
                 last_action_error = obs_dict.get("last_action_error", None)
 
                 if done and result.metadata:
                     raw_score = float(result.metadata.get("final_score", 0.05))
-                    final_score = clamp_score_strict(raw_score)
+                    final_score = clamp_strict(raw_score)
             except Exception:
                 step_reward = 0.01
                 done = True
 
             rewards.append(step_reward)
-            action_history.append({"step": step_num, "tool": action["tool"], "target": action["target"]})
-            log_step(step=step_num, action=action_str, reward=step_reward, done=done, error=last_action_error)
+            action_history.append({
+                "step": step_num,
+                "tool": action["tool"],
+                "target": action["target"],
+            })
+            log_step(
+                step=step_num,
+                action=action_str,
+                reward=step_reward,
+                done=done,
+                error=last_action_error,
+            )
 
             if done:
                 break
@@ -300,7 +331,7 @@ def run_task(env, llm_client, task_id):
     except Exception:
         final_score = 0.05
 
-    final_score = clamp_score_strict(final_score)
+    final_score = clamp_strict(final_score)
     success = final_score >= SUCCESS_SCORE_THRESHOLD
 
     return {
@@ -327,6 +358,7 @@ def main():
                 env.close()
             if result is None:
                 result = {
+                    "score": 0.05,
                     "success": False,
                     "steps_taken": 0,
                     "rewards": [0.01],
@@ -334,6 +366,7 @@ def main():
             log_end(
                 success=result["success"],
                 steps=result["steps_taken"],
+                score=result["score"],        # ← THIS WAS MISSING
                 rewards=result["rewards"],
             )
 

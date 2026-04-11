@@ -55,8 +55,7 @@ def compute_reward(
         + wrong_fix_penalty + step_cost
     )
 
-    # Normalize: shift from roughly [-0.5, 1.5] range into (0, 1)
-    # Using a simple linear mapping: (raw + 0.5) / 2.0 maps [-0.5, 1.5] -> [0, 1]
+    # Normalize from roughly [-0.5, 1.5] into (0, 1)
     normalized = (raw_reward + 0.5) / 2.0
 
     return clamp_reward(normalized)
