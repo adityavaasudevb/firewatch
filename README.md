@@ -71,7 +71,7 @@ That's it! The `FireWatchClient.from_docker_image()` method handles:
 - Connecting to the environment
 - Container cleanup when you call `close()`
 
-The examples in this README assume you are working from the repository root, where [client.py](/c:/Users/adiva/Desktop/firewatch/client.py) and [models.py](/c:/Users/adiva/Desktop/firewatch/models.py) are directly importable.
+The examples in this README assume you are working from the repository root, where `client.py` and `models.py` are directly importable.
 
 ---
 
