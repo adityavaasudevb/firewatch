@@ -8,6 +8,11 @@ Each returns {"score": 0.0-1.0, "breakdown": {...}, "reason": "..."}.
 from typing import Dict, List
 
 
+def strict_score(raw: float) -> float:
+    """Clamp any score into the strict open interval (0, 1)."""
+    return round(max(0.001, min(0.999, float(raw))), 4)
+
+
 # =============================================================================
 # Task 1 Grader: Single Service Failure
 # =============================================================================
@@ -76,7 +81,7 @@ def grade_task1(
 
     raw = fix_score + efficiency_score + diagnosis_score + health_score + behavior_score - penalty
     # Clamp to strictly between 0 and 1 (not 0.0 or 1.0)
-    score = round(max(0.001, min(0.999, raw)), 4)
+    score = strict_score(raw)
 
     if not correct_fix:
         reason = "Agent failed to restart the database (OOM root cause)."
@@ -194,7 +199,7 @@ def grade_task2(
         + efficiency_score + health_score
         - symptom_penalty - behavior_penalty
     )
-    score = round(max(0.001, min(0.999, raw)), 4)
+    score = strict_score(raw)
 
     return {
         "score": score,
@@ -291,7 +296,7 @@ def grade_task3(
     )
     if inv_score == 0:
         raw *= 0.75
-    score = round(max(0.001, min(0.999, raw)), 4)
+    score = strict_score(raw)
 
     if not (fix1_idx or fix2_idx or fix3_idx):
         reason = "No meaningful fixes applied."
@@ -410,7 +415,7 @@ def grade_task4(
     if primary_fix and not investigated_db:
         raw_score *= 0.75
 
-    final_score = round(max(0.001, min(0.999, raw_score)), 4)
+    final_score = strict_score(raw_score)
 
     parts = []
     if primary_fix:

@@ -61,7 +61,7 @@ class FireWatchEnvironment(Environment):
         self._step: int = 0
         self._step_budget: int = 10
         self._done: bool = False
-        self._final_score: float = 0.0
+        self._final_score: float = 0.001
         self._last_action_result: Optional[str] = None
         self._last_action_error: Optional[str] = None
         self._topology_snapshot: dict = {}
@@ -88,7 +88,7 @@ class FireWatchEnvironment(Environment):
         self._step = 0
         self._step_budget = self._task_config["step_budget"]
         self._done = False
-        self._final_score = 0.0
+        self._final_score = 0.001
         self._last_action_result = "Incident detected. Begin investigation."
         self._last_action_error = None
         self._topology_snapshot = {}
@@ -175,8 +175,8 @@ class FireWatchEnvironment(Environment):
                 raw_score = grader_output["score"]
                 self._final_score = max(0.001, min(0.999, raw_score))
                 grader_output["score"] = self._final_score
-                extra_metadata["final_score"] = self._final_score
                 extra_metadata["grader_details"] = grader_output
+            extra_metadata["final_score"] = self._final_score
 
         return self._build_observation(
             reward=reward,
