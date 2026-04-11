@@ -6,15 +6,17 @@ import json
 import os
 import re
 import textwrap
+from dotenv import load_dotenv
 
 from openai import OpenAI
 
+load_dotenv()
+
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.2")
-HF_TOKEN = os.getenv("HF_TOKEN")
-
-if HF_TOKEN is None:
-    raise ValueError("HF_TOKEN environment variable is required")
+API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("HF_TOKEN")
+if API_KEY is None:
+    raise ValueError("Either GOOGLE_API_KEY or HF_TOKEN environment variable is required")
 
 MAX_STEPS_PER_TASK = 30
 TEMPERATURE = 0.0
@@ -45,12 +47,12 @@ def log_start(task, env, model):
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
-def log_step(step, action, reward, done, error):
+def log_step(step, action, reward, done, error, source="llm"):
     done_str = "true" if done else "false"
     error_str = error if error is not None else "null"
     # Raw reward printed as-is — negatives are fine here
     print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_str} error={error_str}",
+        f"[STEP] step={step} action={action} source={source} reward={reward:.2f} done={done_str} error={error_str}",
         flush=True,
     )
 
@@ -265,6 +267,7 @@ def run_task(env, llm_client, task_id):
 
             user_prompt = observation_to_prompt(obs_dict, step_num, action_history)
 
+            action_source = "llm"
             action = None
             try:
                 completion = llm_client.chat.completions.create(
@@ -278,16 +281,19 @@ def run_task(env, llm_client, task_id):
                 )
                 response_text = completion.choices[0].message.content or ""
                 action = parse_action(response_text)
-            except Exception:
+            except Exception as e:
+                print(f"[DEBUG] LLM Exception: {e}")
                 response_text = ""
 
             if action and len(action_history) >= 3:
                 last_3 = [(a["tool"], a["target"]) for a in action_history[-3:]]
                 if last_3.count((action["tool"], action["target"])) >= 2:
                     action = heuristic_fallback(obs_dict, action_history)
+                    action_source = "heuristic"
 
             if action is None:
                 action = heuristic_fallback(obs_dict, action_history)
+                action_source = "heuristic"
 
             action_str = f"{action['tool']}({action['target']})"
             step_reward = -0.02  # default: step cost
@@ -326,6 +332,7 @@ def run_task(env, llm_client, task_id):
                 reward=step_reward,
                 done=done,
                 error=last_action_error,
+                source=action_source,
             )
 
             if done:
@@ -349,7 +356,7 @@ def run_task(env, llm_client, task_id):
 def main():
     from server.firewatch_environment import FireWatchEnvironment
 
-    llm_client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     for task_id in ["task1", "task2", "task3", "task4"]:
         env = FireWatchEnvironment()
