@@ -266,11 +266,12 @@ The world changes during the episode on a fixed schedule:
 
 The step budget is **hidden** from the agent (partial observability). The agent must handle the initial root cause while adapting to a changing system.
 
-Scoring is split to ensure fairness:
+Scoring emphasizes the primary objective while rewarding adaptation:
 
-- 60% - Did the agent fix the initial database failure?
-- 25% - Did the agent respond to the new failures at steps 5 and 8?
-- 15% - Final system health
+- **Primary fix (database):** Highest weight — fixing the initial failure is essential
+- **Secondary response:** Credit for handling cache and notification failures that emerge later
+- **Investigation breadth:** Partial credit for thorough diagnosis even without fixes
+- **Efficiency:** Faster primary fixes score higher
 
 - Step budget: 25 (hidden)
 
@@ -278,25 +279,31 @@ Scoring is split to ensure fairness:
 
 ## Baseline Scores
 
-Scores produced by a hybrid LLM + heuristic baseline:
+Scores produced by a multi-turn LLM baseline with investigation fallback:
 
 | Task | Name | Difficulty | Baseline Score |
 |------|------|------------|----------------|
-| task1 | Single Service Failure | Easy | 0.79 |
-| task2 | Cascading Failure with Red Herring | Medium | 0.76 |
-| task3 | Multi-vector Ordered Incident | Hard | 0.84 |
-| task4 | Non-stationary Adaptive Incident | Expert | 0.95 |
-| **Average** | | | **0.83** |
+| task1 | Single Service Failure | Easy | 0.91 |
+| task2 | Cascading Failure with Red Herring | Medium | 0.34 |
+| task3 | Multi-vector Ordered Incident | Hard | 0.27 |
+| task4 | Non-stationary Adaptive Incident | Expert | 0.16 |
+| **Average** | | | **0.42** |
 
-These scores were produced with the verified submission-time setup using the Hugging Face router and `Qwen/Qwen2.5-7B-Instruct-1M`.
+These scores were produced using `Qwen/Qwen2.5-72B-Instruct` via the Hugging Face router.
 
-Measured full-run inference time with this verified setup is approximately **28 seconds** on the tested machine.
+**Score interpretation:** Task 1 is reliably solvable — the model diagnoses and fixes the OOM in 4 steps. Tasks 2-4 expose a genuine LLM failure mode: models can gather diagnostic evidence (read logs, identify root causes) but struggle to commit to remediation actions when multiple simultaneous failures are present. This gap between diagnosis and action is precisely what RL training could address.
+
+The descending score pattern confirms meaningful difficulty progression:
+- **Easy (0.91):** Single failure, single fix — solvable with basic log reading
+- **Medium (0.34):** Correct diagnosis but distracted by red herring, fails to apply fix
+- **Hard (0.27):** Multiple root causes diagnosed via logs, but agent cannot plan ordered remediation
+- **Expert (0.16):** Non-stationary system overwhelms the agent — broad investigation without any fixes applied
 
 To reproduce baseline scores, run:
 
 ```bash
 export HF_TOKEN="your_token"
-export MODEL_NAME="Qwen/Qwen2.5-7B-Instruct-1M"
+export MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
 export API_BASE_URL="https://router.huggingface.co/v1"
 python inference.py
 ```
@@ -393,7 +400,7 @@ curl http://localhost:8000/health
 ```bash
 # Set environment variables
 export HF_TOKEN="your_huggingface_token"
-export MODEL_NAME="Qwen/Qwen2.5-7B-Instruct-1M"
+export MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
 export API_BASE_URL="https://router.huggingface.co/v1"
 
 # Run inference
@@ -447,17 +454,61 @@ firewatch/
 
 ---
 
+## Why FireWatch Matters
+
+### The Problem
+Every production team runs incident response. When systems break at 3am, an on-call engineer must diagnose root causes across interconnected services, under time pressure, with incomplete information. This is one of the highest-stakes human tasks in software engineering — and one of the least benchmarked for AI agents.
+
+### What's Missing Today
+Existing agent benchmarks evaluate static reasoning: answer a question, write some code, fill a form. None evaluate **triage under non-stationary conditions** — where the system degrades while you think, where symptoms mislead you toward the wrong service, and where the order of your actions changes their effectiveness.
+
+### What FireWatch Provides
+- **For RL researchers:** A non-stationary MDP with dense rewards, partial observability, and structured traps — properties identified as critical gaps in current benchmarks.
+- **For agent developers:** A realistic evaluation of causal reasoning, prioritization, and adaptation — the skills that separate useful AI assistants from toy demos.
+- **For SRE teams:** A training ground for evaluating whether AI agents can handle real incident patterns (cascading failures, red herrings, ordered remediation).
+
+---
+
 ## What Makes FireWatch Unique
 
-**Non-stationary world:** Every existing OpenEnv environment waits patiently for the agent. FireWatch degrades autonomously every step via `tick()`. Passivity is penalized by the environment itself, not by a sparse end-reward. This makes FireWatch a genuine non-stationary MDP - the property the RL research community has identified as most missing from current benchmarks.
+**Non-stationary world:** Every existing OpenEnv environment waits patiently for the agent. FireWatch degrades autonomously every step via `tick()`. Passivity is penalized by the environment itself, not by a sparse end-reward. This makes FireWatch a genuine non-stationary MDP — the property the RL research community has identified as most missing from current benchmarks.
 
-Unlike static or single-step benchmarks, delayed action in FireWatch changes the environment itself, so the agent is evaluated on triage under evolving system state rather than on isolated decisions.
+**Structured traps for LLMs:** Task 2's red herring exploits the LLM tendency to fix the most visible alert rather than trace root causation. Task 3's order dependency breaks models that jump to action without planning. Task 4's partial observability (hidden step budget + changing topology) collapses static reasoners. These are documented, research-validated failure modes of frontier models — not arbitrary difficulty.
 
-**Structured traps for LLMs:** Task 2's red herring exploits the LLM tendency to fix the most visible alert rather than trace root causation. Task 3's order dependency breaks models that jump to action without planning. Task 4's partial observability (hidden step budget + changing topology) collapses static reasoners. These are documented, research-validated failure modes of frontier models - not arbitrary difficulty.
+**Diagnosis-action gap:** Our baseline reveals that even 72B-parameter models can correctly diagnose failures (read logs, identify root causes) but fail to bridge from evidence to remediation. This gap between understanding and action is exactly what RL training is designed to close — making FireWatch a meaningful training environment, not just a benchmark.
 
-**Honest partial credit:** Every grader provides partial credit at multiple granularities. An agent that investigates correctly but applies the wrong fix still scores 0.20-0.35. No grader produces binary 0/1 outcomes.
+**Honest partial credit:** Every grader provides partial credit at multiple granularities. An agent that investigates correctly but applies the wrong fix scores 0.20-0.35. An agent that diagnoses all root causes but applies no fixes scores 0.15-0.30. No grader produces binary 0/1 outcomes.
 
-FireWatch evaluates not just correctness, but sequencing, causality reasoning, and adaptation under changing system dynamics.
+---
+
+## Difficulty Analysis
+
+### Why Task 2 Breaks Naive Agents
+Auth-service shows `WARN memory usage at 78%` — a salient but irrelevant alert. LLMs trained on helpful-assistant data have a documented tendency to address the most visible problem first. An agent that fixes auth-service wastes a step and gets penalized, while the real root cause (database connection pool exhaustion) continues degrading.
+
+### Why Task 3 Requires Planning
+The three required fixes have a dependency chain:
+1. `rollback_config(api-gateway)` must come first — it stops the memory leak
+2. `reset_ratelimit(api-gateway)` only works after rollback — applying it first gives partial improvement but the config leak re-triggers it
+3. `sync_replica(database)` is independent but must come last to avoid the replica falling behind again during api-gateway remediation
+
+An agent that diagnoses both root causes but applies no fixes scores ~0.27. An agent that applies all three in correct order scores ~0.85. This tests sequential planning, not just tool selection.
+
+### Why Task 4 Defeats Static Reasoners
+The environment changes at steps 5 and 8. An agent that perfectly solves the initial database failure but ignores the cache crash at step 5 scores only ~0.50. The step budget is hidden, so the agent cannot plan a fixed-length strategy. It must continuously re-assess system state and adapt — the defining challenge of non-stationary environments.
+
+### Reward Examples
+
+| Action | Scenario | Reward | Breakdown |
+|--------|----------|--------|-----------|
+| `get_topology(system)` | Any | `0.00` | Free action, no step cost |
+| `get_logs(database)` | DB is root cause | `+0.28` | diagnosis_bonus(0.3) - step_cost(0.02) |
+| `get_logs(cache)` | Cache is healthy | `-0.02` | Only step cost |
+| `restart_service(database)` | DB has OOM | `+1.55` | health_delta + fix_bonus(1.0) - step_cost(0.02) |
+| `restart_service(cache)` | Cache is healthy | `-0.37` | health_delta(-0.05) + wrong_fix(-0.3) - step_cost(0.02) |
+| `mark_resolved(system)` | End of episode | `-0.02` | Step cost only |
+
+Wrong actions are clearly penalized. Correct actions spike positive. The agent receives unambiguous signal on every step.
 
 ---
 

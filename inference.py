@@ -10,15 +10,15 @@ import textwrap
 from openai import OpenAI
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.2")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 if HF_TOKEN is None:
     raise ValueError("HF_TOKEN environment variable is required")
 
-MAX_STEPS_PER_TASK = 30
+MAX_STEPS_PER_TASK = 25
 TEMPERATURE = 0.0
-MAX_TOKENS = 350
+MAX_TOKENS = 512
 SUCCESS_SCORE_THRESHOLD = 0.5
 
 VALID_TOOLS = [
@@ -32,12 +32,13 @@ VALID_TARGETS = [
     "database", "cache", "notification-service", "system",
 ]
 
+FIX_TOOLS = {
+    "restart_service", "rollback_config", "reset_ratelimit",
+    "sync_replica", "clear_connections", "scale_service",
+}
+
 
 def clamp_score(raw: float) -> float:
-    """
-    Clamp ONLY the final task score to strictly within (0, 1).
-    Per-step rewards are NOT clamped — negatives are valid and meaningful.
-    """
     return round(max(0.01, min(0.99, raw)), 2)
 
 
@@ -48,7 +49,6 @@ def log_start(task, env, model):
 def log_step(step, action, reward, done, error):
     done_str = "true" if done else "false"
     error_str = error if error is not None else "null"
-    # Raw reward printed as-is — negatives are fine here
     print(
         f"[STEP] step={step} action={action} reward={reward:.2f} done={done_str} error={error_str}",
         flush=True,
@@ -57,7 +57,6 @@ def log_step(step, action, reward, done, error):
 
 def log_end(success, steps, score, rewards):
     success_str = "true" if success else "false"
-    # score= must be in (0,1) — this is what the validator checks
     safe_score = clamp_score(score)
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
@@ -68,37 +67,90 @@ def log_end(success, steps, score, rewards):
 
 SYSTEM_PROMPT = textwrap.dedent("""
 You are an expert Site Reliability Engineer (SRE) responding to a live
-production incident. Diagnose the root cause and restore system health.
+production incident. The system is actively degrading — every step costs time.
+
+CRITICAL WORKFLOW — FOLLOW THIS EXACTLY:
+  Step 1: get_topology(system)     — FREE, always do this first
+  Step 2: get_logs(<alerting svc>) — MANDATORY before any fix
+  Step 3: apply the correct fix based on what logs reveal
+  Step 4: mark_resolved(system)    — ONLY when health > 0.80
+
+TOOL → FIX MAPPING (from log evidence):
+  Log contains "OOMKiller" or "out-of-memory"             → restart_service(service)
+  Log contains "connection pool" or "HikariPool"          → clear_connections(service)
+  Log contains "config" or "memory leak" or "GC overhead" → rollback_config(service)
+  Log contains "rate limit" or "429" or "req/s"           → reset_ratelimit(service)
+  Log contains "replica lag" or "stale read"              → sync_replica(service)
+  Service is overwhelmed with traffic                     → scale_service(service)
 
 AVAILABLE TOOLS:
-  get_metrics(service)       check health, error_rate, latency
-  get_logs(service)          read log entries - REVEALS the failure type
-  get_topology()             view service dependency graph (FREE, costs no step)
-  restart_service(service)   fixes OOM errors (look for OOMKiller in logs)
-  rollback_config(service)   fixes config/memory-leak failures
-  reset_ratelimit(service)   fixes rate limiter issues (apply AFTER rollback_config)
-  sync_replica(service)      fixes database replica lag
-  clear_connections(service) fixes connection pool exhaustion
-  scale_service(service)     adds replicas to help with load
-  mark_resolved()            CALL THIS to end the episode when health > 0.80
+  get_metrics(service)       — check health numbers (NOT enough to diagnose)
+  get_logs(service)          — READ THIS to know the correct fix
+  get_topology(system)       — FREE dependency graph, no step cost
+  restart_service(service)   — fixes OOM
+  rollback_config(service)   — fixes memory leaks, config issues
+  reset_ratelimit(service)   — fixes rate limiting (only AFTER rollback_config)
+  sync_replica(service)      — fixes replica lag
+  clear_connections(service) — fixes connection pool exhaustion
+  scale_service(service)     — adds capacity
+  mark_resolved(system)      — ends episode, ONLY when health > 0.80
 
 VALID SERVICES:
   api-gateway, auth-service, payment-service, database, cache,
   notification-service, system
 
-RULES:
-  1. ALWAYS call get_topology() first (FREE)
-  2. Read logs on alerting services before fixing
-  3. Match fix to log evidence
-  4. When health > 0.80, call mark_resolved
-  5. NEVER repeat same action twice
+STRICT RULES:
+  1. get_topology(system) MUST be your first action — it is FREE
+  2. get_logs MUST be called on a degraded service before applying any fix
+  3. NEVER guess a fix — only act on log evidence
+  4. NEVER call mark_resolved unless health > 0.80 AND you applied at least one fix
+  5. NEVER repeat the same action twice
+  6. get_metrics alone is NOT sufficient — logs reveal root cause
+  7. If FINDINGS show a problem with a fix mapping — APPLY THAT FIX NOW
+  8. Multiple services can fail simultaneously — fix each one based on its logs
+  9. After fixing one service, check if others still need fixing
 
-Respond with ONLY valid JSON:
-{"reasoning": "...", "tool": "tool_name", "target": "service_name"}
+Respond with ONLY valid JSON, no other text:
+{"reasoning": "<cite specific log evidence and explain your fix choice>", "tool": "tool_name", "target": "service_name"}
 """).strip()
 
 
-def observation_to_prompt(obs_dict, step, action_history):
+def extract_findings(last_action_result: str):
+    """Parse log output and return a short actionable finding."""
+    if not last_action_result:
+        return None
+
+    text = last_action_result.lower()
+
+    if "oomkiller" in text or "out-of-memory" in text or "out of memory" in text:
+        return "OOM error → APPLY restart_service"
+    if "connection pool" in text or "hikaripool" in text or "connection is not available" in text:
+        return "connection pool exhausted → APPLY clear_connections"
+    if ("config" in text or "reload" in text) and ("leak" in text or "gc overhead" in text or "unreferenced" in text):
+        return "config/memory leak → APPLY rollback_config"
+    if "rate limit" in text or "429" in text or ("req/s" in text and "limit" in text):
+        return "rate limiting breached → APPLY reset_ratelimit (after rollback_config)"
+    if "replication lag" in text or "replica lag" in text or "stale read" in text:
+        return "replica lag → APPLY sync_replica"
+    if "memory usage" in text and ("78%" in text or "threshold" in text or "monitor" in text):
+        return "memory warning only — low severity, may not need fix"
+    if "health check passed" in text or "all systems nominal" in text or "restarted successfully" in text:
+        return "service is healthy — no action needed"
+
+    return None
+
+
+def build_observation_message(
+    obs_dict,
+    step,
+    findings,
+    fixes_applied,
+    last_action_was_log,
+    last_log_finding,
+    last_log_target,
+    is_first_step=False,
+):
+    """Build the user message for this conversation turn."""
     alerts = obs_dict.get("active_alerts", [])
     services = obs_dict.get("services", {})
     last = obs_dict.get("last_action_result", "")
@@ -125,33 +177,73 @@ def observation_to_prompt(obs_dict, step, action_history):
             if isinstance(topology, dict)
             else getattr(topology, "dependencies", {})
         )
-        topo_lines = "\n".join(
-            f"  {svc} -> {d or '(no deps)'}" for svc, d in deps.items()
-        )
+        topo_lines = "\n".join(f"  {svc} -> {deps[svc]}" for svc in deps)
         topo_section = f"\nDEPENDENCY GRAPH:\n{topo_lines}"
 
-    history_lines = ""
-    if action_history:
-        recent = action_history[-6:]
-        history_lines = "\nRECENT ACTIONS:\n" + "\n".join(
-            f"  step {a['step']}: {a['tool']}({a['target']})" for a in recent
+    summary_section = ""
+    if is_first_step and summary:
+        summary_section = f"\nINCIDENT: {summary.strip()[:300]}\n"
+
+    findings_section = ""
+    if findings:
+        lines = [f"  {svc}: {finding}" for svc, finding in findings.items()]
+        findings_section = "\nFINDINGS FROM LOGS:\n" + "\n".join(lines)
+
+    fixes_section = ""
+    if fixes_applied:
+        fixes_section = "\nFIXES APPLIED:\n" + "\n".join(f"  {f}" for f in fixes_applied)
+
+    action_directive = ""
+    if last_action_was_log and last_log_finding and "APPLY" in (last_log_finding or ""):
+        action_directive = (
+            f"\n🚨 IMMEDIATE ACTION REQUIRED 🚨\n"
+            f"You just read logs for {last_log_target}.\n"
+            f"Finding: {last_log_finding}\n"
+            f"DO NOT investigate more services. APPLY THE FIX NOW.\n"
+            f"Respond with the fix action for {last_log_target}."
         )
+    elif findings and not fixes_applied:
+        actionable = {
+            svc: f for svc, f in findings.items()
+            if "APPLY" in f
+            and services.get(svc, {}).get("status", "healthy") != "healthy"
+        }
+        if actionable:
+            svc, finding = next(iter(actionable.items()))
+            action_directive = (
+                f"\n You have evidence for {svc}: {finding}\n"
+                f"Apply the fix before investigating more."
+            )
+    elif fixes_applied and health > 0.80:
+        action_directive = "\n Health > 0.80 and fixes applied. Call mark_resolved(system)."
+    elif fixes_applied:
+        still_broken = [
+            svc for svc, f in findings.items()
+            if "APPLY" in f
+            and services.get(svc, {}).get("status", "healthy") != "healthy"
+            and not any(svc in fix for fix in fixes_applied)
+        ]
+        if still_broken:
+            action_directive = (
+                f"\n Still degraded: {', '.join(still_broken)}. "
+                f"Get logs and fix them."
+            )
 
     budget_str = str(budget) if budget is not None else "HIDDEN"
 
     return f"""STEP {step} | Health: {health:.3f} | Budget: {budget_str}
-
-INCIDENT: {summary.strip()[:200]}
-
+{summary_section}
 ALERTS:
 {alert_lines}
 
 SERVICES:
 {svc_lines}
 {topo_section}
-{history_lines}
+{findings_section}
+{fixes_section}
 
 LAST RESULT: {last}
+{action_directive}
 
 Respond with JSON only."""
 
@@ -178,59 +270,37 @@ def parse_action(response_text):
     return None
 
 
-def heuristic_fallback(obs, history):
-    done_actions = {(a["tool"], a["target"]) for a in history}
-    services = obs.get("services", {})
-    health = obs.get("system_health", 0.0)
+def investigation_fallback(obs_dict, action_history, findings):
+    """Investigation-only fallback — ZERO fix logic."""
+    done_actions = {(a["tool"], a["target"]) for a in action_history}
+    services = obs_dict.get("services", {})
 
     if ("get_topology", "system") not in done_actions:
         return {"tool": "get_topology", "target": "system"}
 
-    for svc in [
-        "database", "api-gateway", "payment-service",
-        "cache", "auth-service", "notification-service",
-    ]:
-        svc_data = services.get(svc, {})
-        status = (
-            svc_data.get("status", "healthy")
-            if isinstance(svc_data, dict)
-            else "healthy"
-        )
-        if status != "healthy" and ("get_logs", svc) not in done_actions:
-            return {"tool": "get_logs", "target": svc}
+    degraded_without_logs = sorted(
+        [
+            (name, data)
+            for name, data in services.items()
+            if isinstance(data, dict)
+            and data.get("status") != "healthy"
+            and ("get_logs", name) not in done_actions
+        ],
+        key=lambda x: x[1].get("health", 1.0),
+    )
+    if degraded_without_logs:
+        return {"tool": "get_logs", "target": degraded_without_logs[0][0]}
 
-    if services.get("api-gateway", {}).get("status") != "healthy":
-        if ("rollback_config", "api-gateway") not in done_actions:
-            return {"tool": "rollback_config", "target": "api-gateway"}
-        if ("reset_ratelimit", "api-gateway") not in done_actions:
-            return {"tool": "reset_ratelimit", "target": "api-gateway"}
-
-    if services.get("database", {}).get("status", "healthy") != "healthy":
-        if ("clear_connections", "database") not in done_actions:
-            return {"tool": "clear_connections", "target": "database"}
-        if ("restart_service", "database") not in done_actions:
-            return {"tool": "restart_service", "target": "database"}
-        if ("sync_replica", "database") not in done_actions:
-            return {"tool": "sync_replica", "target": "database"}
-
-    if services.get("cache", {}).get("status") != "healthy":
-        if ("restart_service", "cache") not in done_actions:
-            return {"tool": "restart_service", "target": "cache"}
-
-    if services.get("notification-service", {}).get("status") != "healthy":
-        if ("scale_service", "notification-service") not in done_actions:
-            return {"tool": "scale_service", "target": "notification-service"}
-
-    degraded = [
-        s for s, v in services.items()
-        if isinstance(v, dict) and v.get("status") != "healthy"
+    degraded_without_metrics = [
+        (name, data)
+        for name, data in services.items()
+        if isinstance(data, dict)
+        and data.get("status") != "healthy"
+        and ("get_metrics", name) not in done_actions
     ]
-    if health > 0.82 or not degraded:
-        return {"tool": "mark_resolved", "target": "system"}
-
-    for svc in degraded:
-        if ("get_metrics", svc) not in done_actions:
-            return {"tool": "get_metrics", "target": svc}
+    if degraded_without_metrics:
+        worst = min(degraded_without_metrics, key=lambda x: x[1].get("health", 1.0))
+        return {"tool": "get_metrics", "target": worst[0]}
 
     return {"tool": "mark_resolved", "target": "system"}
 
@@ -244,7 +314,7 @@ TASK_NAMES = {
 
 
 def run_task(env, llm_client, task_id):
-    """Run one task episode. Returns dict with results. Does NOT emit [END]."""
+    """Run one task episode using multi-turn conversation with persistent findings."""
     from models import FireWatchAction
 
     task_name = TASK_NAMES.get(task_id, task_id)
@@ -255,6 +325,14 @@ def run_task(env, llm_client, task_id):
     steps_taken = 0
     final_score = 0.05
 
+    findings = {}
+    fixes_applied = []
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    last_action_was_log = False
+    last_log_finding = None
+    last_log_target = None
+
     try:
         obs = env.reset(task_id=task_id)
         obs_dict = obs.model_dump()
@@ -263,16 +341,24 @@ def run_task(env, llm_client, task_id):
             if obs_dict.get("done", False):
                 break
 
-            user_prompt = observation_to_prompt(obs_dict, step_num, action_history)
+            user_msg = build_observation_message(
+                obs_dict=obs_dict,
+                step=step_num,
+                findings=findings,
+                fixes_applied=fixes_applied,
+                last_action_was_log=last_action_was_log,
+                last_log_finding=last_log_finding,
+                last_log_target=last_log_target,
+                is_first_step=(step_num == 1),
+            )
+            messages.append({"role": "user", "content": user_msg})
 
             action = None
+            response_text = ""
             try:
                 completion = llm_client.chat.completions.create(
                     model=MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    messages=messages,
                     temperature=TEMPERATURE,
                     max_tokens=MAX_TOKENS,
                 )
@@ -280,19 +366,26 @@ def run_task(env, llm_client, task_id):
                 action = parse_action(response_text)
             except Exception:
                 response_text = ""
-
-            if action and len(action_history) >= 3:
-                last_3 = [(a["tool"], a["target"]) for a in action_history[-3:]]
-                if last_3.count((action["tool"], action["target"])) >= 2:
-                    action = heuristic_fallback(obs_dict, action_history)
+                action = None
 
             if action is None:
-                action = heuristic_fallback(obs_dict, action_history)
+                action = investigation_fallback(obs_dict, action_history, findings)
+                response_text = json.dumps({
+                    "reasoning": "Fallback: LLM did not produce valid JSON.",
+                    "tool": action["tool"],
+                    "target": action["target"],
+                })
+
+            messages.append({"role": "assistant", "content": response_text})
 
             action_str = f"{action['tool']}({action['target']})"
-            step_reward = -0.02  # default: step cost
+            step_reward = -0.02
             done = False
             last_action_error = None
+
+            last_action_was_log = False
+            last_log_finding = None
+            last_log_target = None
 
             try:
                 fw_action = FireWatchAction(
@@ -307,9 +400,22 @@ def run_task(env, llm_client, task_id):
                 steps_taken = step_num
                 last_action_error = obs_dict.get("last_action_error", None)
 
+                if action["tool"] == "get_logs":
+                    last_result = obs_dict.get("last_action_result", "")
+                    finding = extract_findings(last_result)
+                    if finding:
+                        findings[action["target"]] = finding
+                        last_action_was_log = True
+                        last_log_finding = finding
+                        last_log_target = action["target"]
+
+                if action["tool"] in FIX_TOOLS:
+                    fixes_applied.append(action_str)
+
                 if done and result.metadata:
                     raw_score = float(result.metadata.get("final_score", 0.05))
                     final_score = clamp_score(raw_score)
+
             except Exception:
                 step_reward = -0.02
                 done = True
