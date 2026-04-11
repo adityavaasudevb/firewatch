@@ -10,7 +10,7 @@ from typing import Dict, List
 
 def strict_score(raw: float) -> float:
     """Clamp score to strictly within (0, 1) — never 0.0 or 1.0."""
-    return round(max(0.05, min(0.95, raw)), 4)
+    return round(max(0.01, min(0.99, raw)), 4)
 
 
 # =============================================================================
@@ -353,7 +353,7 @@ def grade_task4(
         for a in action_history
     )
 
-    primary_score = 0.65 if primary_fix else (0.20 if investigated_db else 0.0)
+    primary_score = 0.55 if primary_fix else (0.15 if investigated_db else 0.05)
 
     actions_after_5 = [a for a in action_history if a["step"] >= 5]
     actions_after_8 = [a for a in action_history if a["step"] >= 8]
@@ -395,11 +395,11 @@ def grade_task4(
             if a["tool"] == "clear_connections" and a["target"] == "database"
         )
         if primary_step <= 5:
-            efficiency_score = 0.15
-        elif primary_step <= 8:
             efficiency_score = 0.10
+        elif primary_step <= 8:
+            efficiency_score = 0.07
         elif primary_step <= 12:
-            efficiency_score = 0.06
+            efficiency_score = 0.04
         else:
             efficiency_score = 0.02
 

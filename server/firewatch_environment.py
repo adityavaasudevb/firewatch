@@ -27,17 +27,9 @@ except ImportError:
     from firewatch.graders import GRADERS
 
 
-def clamp_env_score(raw: float) -> float:
-    return max(0.05, min(0.95, raw))
-
-
-def safe_reward(raw: float) -> float:
-    """Ensure reward is never exactly 0.0 or 1.0."""
-    if raw == 0.0:
-        return 0.001
-    if raw == 1.0:
-        return 0.999
-    return raw
+def clamp_strict(raw: float) -> float:
+    """Clamp to strictly within (0, 1) — never exactly 0.0 or 1.0."""
+    return round(max(0.01, min(0.99, raw)), 4)
 
 
 class FireWatchEnvironment(Environment):
@@ -77,12 +69,12 @@ class FireWatchEnvironment(Environment):
         self.sim.apply_scenario(self._task_config["scenario_id"])
         reset_episode_tracking(self._episode_id)
 
-        return self._build_observation(reward=0.001, done=False)
+        return self._build_observation(reward=0.01, done=False)
 
     def step(self, action: FireWatchAction) -> FireWatchObservation:
         if self._done:
             return self._build_observation(
-                reward=0.001,
+                reward=0.01,
                 done=True,
                 extra_metadata={"message": "Episode already ended.", "final_score": self._final_score},
             )
@@ -111,8 +103,8 @@ class FireWatchEnvironment(Environment):
             root_cause_services=self._task_config.get("root_causes", []),
         )
 
-        # Make reward safe
-        reward = safe_reward(reward)
+        # reward is already clamped by compute_reward, but double-check
+        reward = clamp_strict(reward)
 
         if action.tool != "get_topology":
             self.sim.tick()
@@ -140,8 +132,7 @@ class FireWatchEnvironment(Environment):
                     steps_taken=self._step,
                     max_steps=self._step_budget,
                 )
-                raw_score = grader_output["score"]
-                self._final_score = clamp_env_score(raw_score)
+                self._final_score = clamp_strict(grader_output["score"])
                 grader_output["score"] = self._final_score
                 extra_metadata["final_score"] = self._final_score
                 extra_metadata["grader_details"] = grader_output
@@ -208,8 +199,8 @@ class FireWatchEnvironment(Environment):
         if extra_metadata:
             metadata.update(extra_metadata)
 
-        # Ensure reward is never exactly 0.0
-        safe_rwd = safe_reward(reward)
+        # Final safety clamp on reward
+        safe_rwd = clamp_strict(reward)
 
         return FireWatchObservation(
             step=self._step,

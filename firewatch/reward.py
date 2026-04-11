@@ -16,6 +16,11 @@ def reset_episode_tracking(episode_id: str) -> None:
     _fix_given.discard(episode_id)
 
 
+def clamp_reward(raw: float) -> float:
+    """Clamp reward to strictly within (0, 1) — never 0.0 or 1.0."""
+    return round(max(0.01, min(0.99, raw)), 4)
+
+
 def compute_reward(
     episode_id: str,
     prev_health: float,
@@ -45,14 +50,13 @@ def compute_reward(
     wrong_fix_penalty = -0.3 if action_result.get("wasted_action") else 0.0
     step_cost = 0.0 if action_tool == "get_topology" else -0.02
 
-    reward_value = round(
+    raw_reward = (
         health_reward + correct_fix_bonus + diagnosis_bonus
-        + wrong_fix_penalty + step_cost,
-        4,
+        + wrong_fix_penalty + step_cost
     )
 
-    # Never return exactly 0.0 - use tiny positive value
-    if reward_value == 0.0:
-        reward_value = 0.001
+    # Normalize: shift from roughly [-0.5, 1.5] range into (0, 1)
+    # Using a simple linear mapping: (raw + 0.5) / 2.0 maps [-0.5, 1.5] -> [0, 1]
+    normalized = (raw_reward + 0.5) / 2.0
 
-    return reward_value
+    return clamp_reward(normalized)

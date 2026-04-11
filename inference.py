@@ -34,6 +34,16 @@ VALID_TARGETS = [
 ]
 
 
+def clamp_reward_strict(raw: float) -> float:
+    """Clamp to strictly within (0, 1) — never 0.0 or 1.0."""
+    return round(max(0.01, min(0.99, raw)), 2)
+
+
+def clamp_score_strict(raw: float) -> float:
+    """Clamp score to strictly within (0, 1)."""
+    return round(max(0.01, min(0.99, raw)), 2)
+
+
 def log_start(task, env, model):
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
@@ -41,12 +51,14 @@ def log_start(task, env, model):
 def log_step(step, action, reward, done, error):
     done_str = "true" if done else "false"
     error_str = error if error is not None else "null"
-    print(f"[STEP] step={step} action={action} reward={reward:.2f} done={done_str} error={error_str}", flush=True)
+    safe_reward = clamp_reward_strict(reward)
+    print(f"[STEP] step={step} action={action} reward={safe_reward:.2f} done={done_str} error={error_str}", flush=True)
 
 
 def log_end(success, steps, rewards):
     success_str = "true" if success else "false"
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    safe_rewards = [clamp_reward_strict(r) for r in rewards]
+    rewards_str = ",".join(f"{r:.2f}" for r in safe_rewards)
     print(f"[END] success={success_str} steps={steps} rewards={rewards_str}", flush=True)
 
 
@@ -202,10 +214,6 @@ def heuristic_fallback(obs, history):
     return {"tool": "mark_resolved", "target": "system"}
 
 
-def clamp_score(score):
-    return max(0.05, min(0.95, score))
-
-
 TASK_NAMES = {
     "task1": "Single Service Failure",
     "task2": "Cascading Failure with Red Herring",
@@ -261,7 +269,7 @@ def run_task(env, llm_client, task_id):
                 action = heuristic_fallback(obs_dict, action_history)
 
             action_str = f"{action['tool']}({action['target']})"
-            step_reward = 0.0
+            step_reward = 0.01
             done = False
             last_action_error = None
 
@@ -269,7 +277,7 @@ def run_task(env, llm_client, task_id):
                 fw_action = FireWatchAction(tool=action["tool"], target=action["target"], parameters={})
                 result = env.step(fw_action)
                 obs_dict = result.model_dump()
-                step_reward = float(result.reward or 0.0)
+                step_reward = clamp_reward_strict(float(result.reward or 0.01))
                 done = result.done
                 steps_taken = step_num
 
@@ -277,8 +285,9 @@ def run_task(env, llm_client, task_id):
 
                 if done and result.metadata:
                     raw_score = float(result.metadata.get("final_score", 0.05))
-                    final_score = clamp_score(raw_score)
+                    final_score = clamp_score_strict(raw_score)
             except Exception:
+                step_reward = 0.01
                 done = True
 
             rewards.append(step_reward)
@@ -289,9 +298,9 @@ def run_task(env, llm_client, task_id):
                 break
 
     except Exception:
-        final_score = clamp_score(0.05)
+        final_score = 0.05
 
-    final_score = clamp_score(final_score)
+    final_score = clamp_score_strict(final_score)
     success = final_score >= SUCCESS_SCORE_THRESHOLD
 
     return {
@@ -320,7 +329,7 @@ def main():
                 result = {
                     "success": False,
                     "steps_taken": 0,
-                    "rewards": [],
+                    "rewards": [0.01],
                 }
             log_end(
                 success=result["success"],
