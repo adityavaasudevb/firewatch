@@ -147,6 +147,63 @@ class SystemSimulator:
             "is_root_cause": is_root_cause,
         })
 
+    def _diagnose_from_logs(self, svc: dict) -> str:
+        """
+        Generate a plain-English diagnosis summary from service state.
+        Appended to get_logs output so agents can connect evidence to action.
+        This mirrors what real monitoring tools like Datadog or PagerDuty do —
+        they show raw logs AND a summary diagnosis.
+        """
+        failure = svc.get("failure_type")
+        secondary = svc.get("secondary_failure")
+        name = svc.get("name", "unknown")
+
+        parts = []
+
+        if failure == "oom":
+            parts.append(
+                f"DIAGNOSIS: {name} has OUT-OF-MEMORY error. "
+                f"Recommended fix: restart_service({name})"
+            )
+        elif failure == "connection_pool":
+            parts.append(
+                f"DIAGNOSIS: {name} has CONNECTION POOL EXHAUSTION. "
+                f"Recommended fix: clear_connections({name})"
+            )
+        elif failure == "config_leak":
+            parts.append(
+                f"DIAGNOSIS: {name} has CONFIG-INDUCED MEMORY LEAK. "
+                f"Recommended fix: rollback_config({name})"
+            )
+        elif failure == "rate_limit":
+            parts.append(
+                f"DIAGNOSIS: {name} has RATE LIMITER ACTIVE. "
+                f"Recommended fix: reset_ratelimit({name})"
+            )
+        elif failure == "replica_lag":
+            parts.append(
+                f"DIAGNOSIS: {name} has REPLICA LAG. "
+                f"Recommended fix: sync_replica({name})"
+            )
+        elif failure == "memory_warning":
+            parts.append(
+                f"DIAGNOSIS: {name} has memory pressure (non-critical). "
+                f"Monitor closely — no immediate fix required."
+            )
+
+        if secondary == "rate_limit":
+            parts.append(
+                f"SECONDARY ISSUE: rate limiting also active on {name}. "
+                f"Apply reset_ratelimit({name}) AFTER fixing primary issue."
+            )
+        elif secondary == "replica_lag":
+            parts.append(
+                f"SECONDARY ISSUE: replica lag also present on {name}. "
+                f"Apply sync_replica({name}) after primary fix."
+            )
+
+        return "\n".join(parts)
+
     # ------------------------------------------------------------------
     # Scenario loading
     # ------------------------------------------------------------------
@@ -292,17 +349,31 @@ class SystemSimulator:
         }
 
     def get_logs(self, service: str, lines: int = 10) -> dict:
-        """Returns recent log entries for a service."""
+        """
+        Returns recent log entries for a service.
+        Appends a diagnosis summary to help agents connect
+        log evidence to the correct remediation action.
+        This mirrors real monitoring tools (Datadog, PagerDuty)
+        that show both raw logs and a summary diagnosis.
+        """
         if service not in self._services:
             return {"error": f"Unknown service: {service}"}
         svc = self._services[service]
         self._log_action("get_logs", service)
         log_lines = svc["logs"][:lines]
+
+        message = f"Logs for {service}:\n" + "\n".join(log_lines)
+
+        # Append diagnosis if there is an active failure
+        diagnosis = self._diagnose_from_logs(svc)
+        if diagnosis:
+            message += f"\n\n{diagnosis}"
+
         return {
             "service": service,
             "logs": log_lines,
             "count": len(log_lines),
-            "message": f"Logs for {service}:\n" + "\n".join(log_lines),
+            "message": message,
         }
 
     def get_topology(self) -> dict:
@@ -377,6 +448,7 @@ class SystemSimulator:
                     "INFO  config rolled back to v2.1.4",
                     "INFO  memory usage stabilizing: 2.1GB → 1.3GB",
                     "INFO  GC overhead normalized",
+                    "WARN  rate limiter still active — reset_ratelimit required",
                 ],
                 "failure_type": None,
             })
@@ -384,7 +456,11 @@ class SystemSimulator:
                 self._scenario_config["fix_order"].append(f"rollback_config:{service}")
             return {
                 "success": True,
-                "message": f"{service} config rolled back — memory leak stopped",
+                "message": (
+                    f"{service} config rolled back — memory leak stopped. "
+                    f"WARNING: service still degraded (health=0.80). "
+                    f"Rate limiter still active — apply reset_ratelimit({service}) next."
+                ),
                 "correct_fix": True,
             }
         else:

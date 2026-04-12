@@ -7,6 +7,11 @@ Each returns {"score": 0.0-1.0, "breakdown": {...}, "reason": "..."}.
 
 from typing import Dict, List
 
+FIX_TOOLS_SET = {
+    "restart_service", "rollback_config", "reset_ratelimit",
+    "sync_replica", "clear_connections", "scale_service",
+}
+
 
 def strict_score(raw: float) -> float:
     """Clamp score to strictly within (0, 1) — never 0.0 or 1.0."""
@@ -66,7 +71,10 @@ def grade_task1(
 
     health_score = final_system_health * 0.10
 
-    useful_tools = {"get_metrics", "get_logs", "restart_service", "mark_resolved", "get_topology"}
+    useful_tools = {
+        "get_metrics", "get_logs", "restart_service",
+        "mark_resolved", "get_topology",
+    }
     useful_count = sum(1 for a in action_history if a["tool"] in useful_tools)
     useless_count = sum(1 for a in action_history if a["tool"] not in useful_tools)
     behavior_score = 0.05 if useful_count > 0 else 0.0
@@ -79,7 +87,16 @@ def grade_task1(
     )
     penalty = min(0.25, wrong_restarts * 0.10)
 
-    raw = fix_score + efficiency_score + diagnosis_score + health_score + behavior_score - penalty
+    # Step penalty — Easy task should be solved in ≤6 steps
+    step_penalty = 0.0
+    if steps_taken > 6:
+        step_penalty = min(0.10, (steps_taken - 6) * 0.02)
+
+    raw = (
+        fix_score + efficiency_score + diagnosis_score
+        + health_score + behavior_score
+        - penalty - step_penalty
+    )
     score = strict_score(raw)
 
     if not correct_fix:
@@ -94,6 +111,8 @@ def grade_task1(
         reason += " No proper investigation."
     if wrong_restarts:
         reason += f" {wrong_restarts} wrong restart(s)."
+    if steps_taken > 6:
+        reason += f" Step penalty: {steps_taken} total steps."
 
     return {
         "score": score,
@@ -104,6 +123,7 @@ def grade_task1(
             "health": health_score,
             "behavior": behavior_score,
             "penalty": -penalty,
+            "step_penalty": -step_penalty,
         },
         "reason": reason,
     }
@@ -129,30 +149,39 @@ def grade_task2(
         a["tool"] == CORRECT_FIX and a["target"] == ROOT_CAUSE
         for a in action_history
     )
-    investigated_db = any(
+    investigated_db_logs = any(
+        a["tool"] == "get_logs" and a["target"] == ROOT_CAUSE
+        for a in action_history
+    )
+    investigated_db_any = any(
         a["tool"] in ("get_metrics", "get_logs") and a["target"] == ROOT_CAUSE
         for a in action_history
     )
 
-    fix_score = 0.45 if correct_fix else 0.0
-    if correct_fix and not investigated_db:
+    # Fix score — reduced from 0.40 to 0.35
+    fix_score = 0.35 if correct_fix else 0.0
+    if correct_fix and not investigated_db_any:
         fix_score *= 0.3
 
+    # Efficiency — tighter windows
     efficiency_score = 0.0
     if correct_fix:
         fix_step = next(
             a["step"] for a in action_history
             if a["tool"] == CORRECT_FIX and a["target"] == ROOT_CAUSE
         )
-        if fix_step <= 6:
-            efficiency_score = 0.08
+        if fix_step <= 4:
+            efficiency_score = 0.10
+        elif fix_step <= 6:
+            efficiency_score = 0.07
         elif fix_step <= 10:
-            efficiency_score = 0.05
+            efficiency_score = 0.04
         else:
-            efficiency_score = 0.02
-        if not investigated_db:
+            efficiency_score = 0.01
+        if not investigated_db_any:
             efficiency_score *= 0.5
 
+    # Red herring avoidance
     touched_rh = any(
         a["tool"] in (
             "restart_service", "rollback_config", "clear_connections",
@@ -161,26 +190,49 @@ def grade_task2(
         and a["target"] == RED_HERRING
         for a in action_history
     )
-    rh_score = 0.15 if not touched_rh else 0.0
+    rh_score = 0.10 if not touched_rh else 0.04
 
-    investigated = [
+    # Investigation
+    investigated_services = {
         a["target"] for a in action_history
         if a["tool"] in ("get_metrics", "get_logs")
-    ]
-    cascade_score = sum(
-        0.05 for svc in ("api-gateway", "payment-service", "database")
-        if svc in investigated
-    )
-    cascade_score = min(0.15, cascade_score)
+    }
+    investigated_with_logs = {
+        a["target"] for a in action_history
+        if a["tool"] == "get_logs"
+    }
+    cascade_services = {"api-gateway", "payment-service", "database"}
+    logs_on_cascade = investigated_with_logs & cascade_services
+    any_on_cascade = investigated_services & cascade_services
 
-    health_score = final_system_health * 0.10
+    diagnosis_score = 0.0
+    if investigated_db_logs:
+        diagnosis_score = 0.12
+    elif investigated_db_any:
+        diagnosis_score = 0.06
+    if len(logs_on_cascade) >= 3:
+        diagnosis_score += 0.08
+    elif len(logs_on_cascade) >= 2:
+        diagnosis_score += 0.04
+    elif len(any_on_cascade) >= 2:
+        diagnosis_score += 0.02
+    diagnosis_score = min(0.20, diagnosis_score)
 
-    symptom_penalty = sum(
-        0.08 for a in action_history
-        if a["tool"] in ("restart_service", "rollback_config")
-        and a["target"] in ("api-gateway", "payment-service")
+    health_score = final_system_health * 0.05
+
+    # Wrong fix penalty — penalize any fix that isn't the correct one
+    wrong_fixes = sum(
+        1 for a in action_history
+        if a["tool"] in FIX_TOOLS_SET
+        and a["tool"] != "scale_service" 
+        and not (a["tool"] == CORRECT_FIX and a["target"] == ROOT_CAUSE)
     )
-    symptom_penalty = min(0.20, symptom_penalty)
+    wrong_fix_penalty = min(0.15, wrong_fixes * 0.03)
+
+    # Step penalty — medium task should be solved in ≤8 steps
+    step_penalty = 0.0
+    if steps_taken > 10:
+        step_penalty = min(0.10, (steps_taken - 10) * 0.02)
 
     useless = sum(
         1 for a in action_history
@@ -189,29 +241,47 @@ def grade_task2(
             "mark_resolved", "get_topology",
         }
     )
-    behavior_penalty = min(0.15, useless * 0.03)
+    behavior_penalty = min(0.10, useless * 0.03)
     if touched_rh:
-        behavior_penalty += 0.10
+        behavior_penalty += 0.04
 
     raw = (
-        fix_score + rh_score + cascade_score
+        fix_score + rh_score + diagnosis_score
         + efficiency_score + health_score
-        - symptom_penalty - behavior_penalty
+        - wrong_fix_penalty - step_penalty - behavior_penalty
     )
     score = strict_score(raw)
+
+    if correct_fix:
+        reason = "Correctly identified and fixed database connection pool issue."
+    elif investigated_db_logs:
+        reason = "Read database logs and diagnosed root cause but did not apply fix."
+    elif investigated_db_any:
+        reason = "Investigated database but did not read logs or apply fix."
+    else:
+        reason = "Did not investigate the root cause service."
+    if touched_rh:
+        reason += " Fell for red herring (auth-service)."
+    elif RED_HERRING in investigated_services:
+        reason += " Investigated auth-service but correctly avoided fixing it."
+    if wrong_fixes:
+        reason += f" {wrong_fixes} wrong fix attempt(s)."
+    if steps_taken > 8:
+        reason += f" Step penalty: {steps_taken} steps."
 
     return {
         "score": score,
         "breakdown": {
             "correct_fix": fix_score,
-            "red_herring": rh_score,
-            "cascade_trace": cascade_score,
+            "red_herring_avoidance": rh_score,
+            "diagnosis": diagnosis_score,
             "efficiency": efficiency_score,
             "health": health_score,
-            "symptom_penalty": -symptom_penalty,
+            "wrong_fix_penalty": -wrong_fix_penalty,
+            "step_penalty": -step_penalty,
             "behavior_penalty": -behavior_penalty,
         },
-        "reason": "Graded successfully",
+        "reason": reason,
     }
 
 
@@ -232,13 +302,11 @@ def grade_task3(
         ("reset_ratelimit", "api-gateway"),
         ("sync_replica", "database"),
     ]
+    REQUIRED_SET = set(REQUIRED)
 
     fix_actions = [
         a for a in action_history
-        if a["tool"] in (
-            "rollback_config", "reset_ratelimit", "sync_replica",
-            "clear_connections", "restart_service",
-        )
+        if a["tool"] in FIX_TOOLS_SET
     ]
 
     fix1_idx = fix2_idx = fix3_idx = None
@@ -251,24 +319,24 @@ def grade_task3(
         elif key == REQUIRED[2] and fix3_idx is None:
             fix3_idx = idx
 
-    # --- Fix scores (total possible: 0.45) ---
-    fix1_score = 0.15 if fix1_idx is not None else 0.0
-    fix3_score = 0.15 if fix3_idx is not None else 0.0
+    # Fix scores — reduced total possible to 0.35
+    fix1_score = 0.12 if fix1_idx is not None else 0.0
+    fix3_score = 0.08 if fix3_idx is not None else 0.0
 
     fix2_score = 0.0
     if fix2_idx is not None:
         if fix1_idx is not None and fix1_idx < fix2_idx:
             fix2_score = 0.15
         else:
-            fix2_score = 0.05
+            fix2_score = 0.03  # applied out of order — minimal credit
 
-    # --- Order bonus (0.10) ---
+    # Order bonus
     order_bonus = 0.0
     if fix1_idx is not None and fix2_idx is not None and fix3_idx is not None:
         if fix1_idx < fix2_idx < fix3_idx:
             order_bonus = 0.10
 
-    # --- Investigation score (max 0.25) ---
+    # Investigation score — reduced max to 0.20
     investigated_with_logs = {
         a["target"] for a in action_history
         if a["tool"] == "get_logs"
@@ -278,46 +346,47 @@ def grade_task3(
         if a["tool"] in ("get_metrics", "get_logs")
     }
     root_causes = {"api-gateway", "database"}
-
     log_on_root = investigated_with_logs & root_causes
+
     inv_score = 0.0
     if len(log_on_root) >= 2:
-        inv_score = 0.20
+        inv_score = 0.15
     elif len(log_on_root) == 1:
-        inv_score = 0.12
+        inv_score = 0.08
     elif investigated_any & root_causes:
-        inv_score = 0.05
-
+        inv_score = 0.04
     if "payment-service" in investigated_with_logs:
         inv_score += 0.05
-    inv_score = min(0.25, inv_score)
+    inv_score = min(0.20, inv_score)
 
-    # --- Behavior penalties ---
-    useful_tools = {
-        "get_metrics", "get_logs", "rollback_config", "reset_ratelimit",
-        "sync_replica", "mark_resolved", "get_topology",
-    }
-    useless = sum(1 for a in action_history if a["tool"] not in useful_tools)
-    bpenalty = min(0.15, useless * 0.04)
+    # Wrong fix penalty — penalize fixes that aren't in the required set
+    wrong_fixes = [
+        a for a in fix_actions
+        if (a["tool"], a["target"]) not in REQUIRED_SET
+    ]
+    wrong_fix_penalty = min(0.20, len(wrong_fixes) * 0.06)
 
+    # Wrong order penalty
     wrong_order_penalty = 0.0
-    if fix2_idx is not None and fix1_idx is not None:
-        if fix2_idx < fix1_idx:
-            wrong_order_penalty = 0.10
+    if fix2_idx is not None and fix1_idx is not None and fix2_idx < fix1_idx:
+        wrong_order_penalty = 0.12
 
-    # --- Health score ---
+    # Step penalty — hard task should be solved in ≤10 steps
+    step_penalty = 0.0
+    if steps_taken > 12:
+        step_penalty = min(0.10, (steps_taken - 12) * 0.02)
+
     health_score = final_system_health * 0.05
 
     raw = (
         fix1_score + fix2_score + fix3_score
         + order_bonus + inv_score + health_score
-        - bpenalty - wrong_order_penalty
+        - wrong_fix_penalty - wrong_order_penalty - step_penalty
     )
     score = strict_score(raw)
 
-    # --- Reason ---
     if not (fix1_idx or fix2_idx or fix3_idx):
-        if inv_score >= 0.12:
+        if inv_score >= 0.08:
             reason = "Diagnosed root causes but did not apply any fixes."
         else:
             reason = "No meaningful fixes or investigation."
@@ -333,6 +402,10 @@ def grade_task3(
     else:
         applied = sum(1 for x in [fix1_idx, fix2_idx, fix3_idx] if x is not None)
         reason = f"Partial remediation — {applied}/3 fixes applied."
+    if wrong_fixes:
+        reason += f" {len(wrong_fixes)} wrong fix attempt(s)."
+    if steps_taken > 10:
+        reason += f" Step penalty: {steps_taken} steps."
 
     return {
         "score": score,
@@ -343,8 +416,9 @@ def grade_task3(
             "order_bonus": order_bonus,
             "investigation": inv_score,
             "health": health_score,
-            "behavior_penalty": -bpenalty,
+            "wrong_fix_penalty": -wrong_fix_penalty,
             "wrong_order_penalty": -wrong_order_penalty,
+            "step_penalty": -step_penalty,
         },
         "reason": reason,
     }
@@ -361,17 +435,7 @@ def grade_task4(
     steps_taken: int,
     max_steps: int,
 ) -> Dict:
-    """
-    Grade Task 4: Non-stationary adaptive incident.
-
-    This is the EXPERT task. Scoring philosophy:
-    - Primary fix (database) is worth the most — 0.45
-    - Without fixing, maximum possible score is ~0.30
-    - Investigation alone gives less credit than Task 3
-      because Expert means you must ACT, not just observe
-    - Secondary objectives matter only if primary is handled
-    """
-    # --- Primary objective: fix database (0.45 possible) ---
+    """Grade Task 4: Non-stationary adaptive incident (EXPERT)."""
     primary_fix = any(
         a["tool"] == "clear_connections" and a["target"] == "database"
         for a in action_history
@@ -385,16 +449,17 @@ def grade_task4(
         for a in action_history
     )
 
+    # Primary score — reduced max to 0.35
     if primary_fix:
-        primary_score = 0.45
+        primary_score = 0.35
     elif investigated_db_logs:
-        primary_score = 0.12
+        primary_score = 0.10
     elif investigated_db_any:
-        primary_score = 0.06
+        primary_score = 0.05
     else:
         primary_score = 0.02
 
-    # --- Secondary objectives (only meaningful if primary fixed) ---
+    # Secondary objectives
     actions_after_5 = [a for a in action_history if a["step"] >= 5]
     actions_after_8 = [a for a in action_history if a["step"] >= 8]
 
@@ -419,98 +484,74 @@ def grade_task4(
 
     secondary_score = 0.0
     if primary_fix:
-        # Full credit only if primary was handled
         if fixed_cache:
             secondary_score += 0.10
         elif investigated_cache:
-            secondary_score += 0.03
+            secondary_score += 0.02
         if fixed_notification:
             secondary_score += 0.08
         elif investigated_notification:
-            secondary_score += 0.02
+            secondary_score += 0.01
     else:
-        # Reduced credit — investigating secondary without fixing primary
-        # shows awareness but not competence
+        # Without primary fix, secondary credit is minimal
         if investigated_cache:
-            secondary_score += 0.02
+            secondary_score += 0.01
         if investigated_notification:
             secondary_score += 0.01
     secondary_score = min(0.18, secondary_score)
 
-    # --- Investigation breadth (capped low for Expert) ---
-    # Expert task should reward ACTION not just observation
-    all_investigated_logs = {
-        a["target"] for a in action_history
-        if a["tool"] == "get_logs"
-    }
-
-    breadth_score = 0.0
-    if primary_fix:
-        # Breadth matters more when you're actually fixing things
-        if len(all_investigated_logs) >= 3:
-            breadth_score = 0.08
-        elif len(all_investigated_logs) >= 2:
-            breadth_score = 0.05
-    else:
-        # Without fixing, investigating broadly gets minimal credit
-        if len(all_investigated_logs) >= 3:
-            breadth_score = 0.04
-        elif len(all_investigated_logs) >= 2:
-            breadth_score = 0.02
-
-    # --- Efficiency ---
+    # Efficiency — expert must be fast on primary fix
     efficiency_score = 0.0
     if primary_fix:
         primary_step = next(
             a["step"] for a in action_history
             if a["tool"] == "clear_connections" and a["target"] == "database"
         )
-        if primary_step <= 4:
-            efficiency_score = 0.10
-        elif primary_step <= 6:
-            efficiency_score = 0.07
-        elif primary_step <= 10:
+        if primary_step <= 3:
+            efficiency_score = 0.12
+        elif primary_step <= 5:
+            efficiency_score = 0.08
+        elif primary_step <= 8:
             efficiency_score = 0.04
         else:
-            efficiency_score = 0.02
+            efficiency_score = 0.01
 
-    # --- Health score ---
     health_score = final_system_health * 0.05
 
-    # --- Penalties ---
+    # Redundancy penalty
     restart_counts: Dict[str, int] = {}
     for a in action_history:
         if a["tool"] in ("restart_service", "clear_connections"):
             restart_counts[a["target"]] = restart_counts.get(a["target"], 0) + 1
     redundant_restarts = sum(max(0, v - 1) for v in restart_counts.values())
-    penalty = min(0.08, redundant_restarts * 0.03)
+    redundancy_penalty = min(0.08, redundant_restarts * 0.03)
 
-    # --- No-fix penalty: Expert task penalizes investigation-only more ---
+    # Step penalty — expert task penalizes wasted steps heavily (≤12 steps)
+    step_penalty = 0.0
+    if steps_taken > 16:
+        step_penalty = min(0.15, (steps_taken - 16) * 0.02)
+
+    # No fix penalty
     no_fix_penalty = 0.0
-    any_fix = any(
-        a["tool"] in ("restart_service", "clear_connections", "rollback_config",
-                       "reset_ratelimit", "sync_replica", "scale_service")
-        for a in action_history
-    )
+    any_fix = any(a["tool"] in FIX_TOOLS_SET for a in action_history)
     if not any_fix and steps_taken >= 5:
-        no_fix_penalty = 0.05  # Investigated but never tried to fix anything
+        no_fix_penalty = 0.05
 
     raw_score = (
-        primary_score + secondary_score + breadth_score
+        primary_score + secondary_score
         + efficiency_score + health_score
-        - penalty - no_fix_penalty
+        - redundancy_penalty - step_penalty - no_fix_penalty
     )
 
     final_score = strict_score(raw_score)
 
-    # --- Reason ---
     parts = []
     if primary_fix:
         parts.append("Primary objective achieved (database fixed).")
     elif investigated_db_logs:
         parts.append("Read database logs but did not apply fix.")
     elif investigated_db_any:
-        parts.append("Checked database metrics but did not investigate logs or fix.")
+        parts.append("Checked database but did not read logs or fix.")
     else:
         parts.append("Primary objective missed entirely.")
 
@@ -531,16 +572,18 @@ def grade_task4(
 
     if not any_fix:
         parts.append("No fixes attempted — investigation only.")
+    if steps_taken > 12:
+        parts.append(f"Step penalty: {steps_taken} steps.")
 
     return {
         "score": final_score,
         "breakdown": {
             "primary_objective": primary_score,
             "secondary_response": secondary_score,
-            "investigation_breadth": breadth_score,
             "efficiency": efficiency_score,
             "health": health_score,
-            "penalty": -penalty,
+            "redundancy_penalty": -redundancy_penalty,
+            "step_penalty": -step_penalty,
             "no_fix_penalty": -no_fix_penalty,
         },
         "reason": " ".join(parts),

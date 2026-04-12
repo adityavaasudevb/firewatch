@@ -5,12 +5,13 @@ inference.py — FireWatch Baseline Inference Script
 import json
 import os
 import re
+import sys
 import textwrap
 
 from openai import OpenAI
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 if HF_TOKEN is None:
@@ -115,13 +116,10 @@ Respond with ONLY valid JSON, no other text:
 """).strip()
 
 
-def extract_findings(last_action_result: str):
-    """Parse log output and return a short actionable finding."""
+def extract_findings(last_action_result):
     if not last_action_result:
         return None
-
     text = last_action_result.lower()
-
     if "oomkiller" in text or "out-of-memory" in text or "out of memory" in text:
         return "OOM error → APPLY restart_service"
     if "connection pool" in text or "hikaripool" in text or "connection is not available" in text:
@@ -129,28 +127,21 @@ def extract_findings(last_action_result: str):
     if ("config" in text or "reload" in text) and ("leak" in text or "gc overhead" in text or "unreferenced" in text):
         return "config/memory leak → APPLY rollback_config"
     if "rate limit" in text or "429" in text or ("req/s" in text and "limit" in text):
-        return "rate limiting breached → APPLY reset_ratelimit (after rollback_config)"
+        return "rate limiting breached → APPLY reset_ratelimit"
     if "replication lag" in text or "replica lag" in text or "stale read" in text:
         return "replica lag → APPLY sync_replica"
     if "memory usage" in text and ("78%" in text or "threshold" in text or "monitor" in text):
         return "memory warning only — low severity, may not need fix"
     if "health check passed" in text or "all systems nominal" in text or "restarted successfully" in text:
         return "service is healthy — no action needed"
-
     return None
 
 
 def build_observation_message(
-    obs_dict,
-    step,
-    findings,
-    fixes_applied,
-    last_action_was_log,
-    last_log_finding,
-    last_log_target,
+    obs_dict, step, findings, fixes_applied,
+    last_action_was_log, last_log_finding, last_log_target,
     is_first_step=False,
 ):
-    """Build the user message for this conversation turn."""
     alerts = obs_dict.get("active_alerts", [])
     services = obs_dict.get("services", {})
     last = obs_dict.get("last_action_result", "")
@@ -196,7 +187,7 @@ def build_observation_message(
     action_directive = ""
     if last_action_was_log and last_log_finding and "APPLY" in (last_log_finding or ""):
         action_directive = (
-            f"\n🚨 IMMEDIATE ACTION REQUIRED 🚨\n"
+            f"\nIMMEDIATE ACTION REQUIRED\n"
             f"You just read logs for {last_log_target}.\n"
             f"Finding: {last_log_finding}\n"
             f"DO NOT investigate more services. APPLY THE FIX NOW.\n"
@@ -211,11 +202,11 @@ def build_observation_message(
         if actionable:
             svc, finding = next(iter(actionable.items()))
             action_directive = (
-                f"\n You have evidence for {svc}: {finding}\n"
+                f"\nYou have evidence for {svc}: {finding}\n"
                 f"Apply the fix before investigating more."
             )
     elif fixes_applied and health > 0.80:
-        action_directive = "\n Health > 0.80 and fixes applied. Call mark_resolved(system)."
+        action_directive = "\nHealth > 0.80 and fixes applied. Call mark_resolved(system)."
     elif fixes_applied:
         still_broken = [
             svc for svc, f in findings.items()
@@ -225,7 +216,7 @@ def build_observation_message(
         ]
         if still_broken:
             action_directive = (
-                f"\n Still degraded: {', '.join(still_broken)}. "
+                f"\nStill degraded: {', '.join(still_broken)}. "
                 f"Get logs and fix them."
             )
 
@@ -271,7 +262,7 @@ def parse_action(response_text):
 
 
 def investigation_fallback(obs_dict, action_history, findings):
-    """Investigation-only fallback — ZERO fix logic."""
+    """Investigation-only fallback — ZERO fix logic. Fires only on LLM failure."""
     done_actions = {(a["tool"], a["target"]) for a in action_history}
     services = obs_dict.get("services", {})
 
@@ -314,7 +305,7 @@ TASK_NAMES = {
 
 
 def run_task(env, llm_client, task_id):
-    """Run one task episode using multi-turn conversation with persistent findings."""
+    """Run one task episode using multi-turn conversation."""
     from models import FireWatchAction
 
     task_name = TASK_NAMES.get(task_id, task_id)
@@ -364,10 +355,12 @@ def run_task(env, llm_client, task_id):
                 )
                 response_text = completion.choices[0].message.content or ""
                 action = parse_action(response_text)
-            except Exception:
+            except Exception as e:
+                print(f"LLM error: {e}", file=sys.stderr, flush=True)
                 response_text = ""
                 action = None
 
+            # Fallback fires ONLY when LLM fails to produce valid JSON
             if action is None:
                 action = investigation_fallback(obs_dict, action_history, findings)
                 response_text = json.dumps({
